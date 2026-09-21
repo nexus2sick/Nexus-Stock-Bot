@@ -337,12 +337,13 @@ class TicketControlView(discord.ui.View):
 
     @discord.ui.button(label="Cerrar Ticket", style=discord.ButtonStyle.primary, custom_id="ticket_close")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Solo staff puede cerrar
         staff_role = interaction.guild.get_role(config.SUPPORT_ROLE_ID) if config.SUPPORT_ROLE_ID else None
         admin_role = interaction.guild.get_role(config.ADMIN_ROLE_ID) if config.ADMIN_ROLE_ID else None
         is_staff = (staff_role and staff_role in interaction.user.roles) or (admin_role and admin_role in interaction.user.roles)
-        if not is_staff:
-            await interaction.response.send_message("❌ Solo el staff puede cerrar tickets.", ephemeral=True)
+        user_overwrite = interaction.channel.overwrites_for(interaction.user)
+        is_ticket_owner = user_overwrite.view_channel is True and user_overwrite.send_messages is True
+        if not (is_staff or is_ticket_owner):
+            await interaction.response.send_message("❌ Solo el creador del ticket o el staff puede cerrarlo.", ephemeral=True)
             return
         await interaction.response.send_message("🔒 El ticket se cerrará y este canal se eliminará en 5 segundos...")
         # Embed de cierre
