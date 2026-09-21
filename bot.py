@@ -554,28 +554,54 @@ class TicketDropdownView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(TicketDropdown())
 
+class TicketPanelSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(
+                label="COMPRAR CUENTA",
+                description="Abrir un ticket para comprar una cuenta.",
+                value="comprar_cuenta",
+                emoji="🛒"
+            ),
+            discord.SelectOption(
+                label="DUDAS O PREGUNTAS",
+                description="Solicitar soporte o resolver una duda.",
+                value="dudas",
+                emoji="❓"
+            ),
+            discord.SelectOption(
+                label="RECLAMAR UN DROP",
+                description="Abrir un ticket para reclamar un drop.",
+                value="reclamar_drop",
+                emoji="🎁"
+            ),
+            discord.SelectOption(
+                label="OTRO",
+                description="Otra consulta o asunto diferente.",
+                value="otra_consulta",
+                emoji="🛠️"
+            )
+        ]
+        super().__init__(
+            placeholder="Selecciona el motivo de tu ticket...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="ticket_panel_select"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        await _create_ticket_channel(interaction, self.values[0])
+
+class TicketPanelSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(TicketPanelSelect())
+
 class TicketOpenView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-
-    async def _open_ticket(self, interaction: discord.Interaction, category_key: str):
-        await _create_ticket_channel(interaction, category_key)
-
-    @discord.ui.button(label="COMPRAR CUENTA", emoji="🛒", style=discord.ButtonStyle.secondary, custom_id="ticket_buy")
-    async def buy_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._open_ticket(interaction, "comprar_cuenta")
-
-    @discord.ui.button(label="DUDAS O PREGUNTAS", emoji="❓", style=discord.ButtonStyle.secondary, custom_id="ticket_questions")
-    async def questions_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._open_ticket(interaction, "dudas")
-
-    @discord.ui.button(label="RECLAMAR UN DROP", emoji="🎁", style=discord.ButtonStyle.secondary, custom_id="ticket_drop")
-    async def drop_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._open_ticket(interaction, "reclamar_drop")
-
-    @discord.ui.button(label="OTRO", emoji="🛠️", style=discord.ButtonStyle.secondary, custom_id="ticket_other")
-    async def other_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._open_ticket(interaction, "otra_consulta")
+        self.add_item(TicketPanelSelect())
 
 @bot.event
 async def on_ready():
@@ -1783,7 +1809,7 @@ async def panel_tickets(interaction: discord.Interaction):
     
     # Crear el embed con el color personalizado
     embed = discord.Embed(
-        title="NEXUS - TICKETS 🔴",
+        title="Nexus Stock • Tienda Oficial",
         description=config.TICKET_PANEL_MESSAGE,
         color=config.COLOR_EMBED
     )
@@ -1791,10 +1817,9 @@ async def panel_tickets(interaction: discord.Interaction):
     embed.set_image(url=config.TICKET_PANEL_BANNER)
     
     # Añadir footer
-    embed.set_footer(text="NexusStore © Todos los derechos reservados")
+    embed.set_footer(text=config.TICKET_PANEL_FOOTER)
     
-    # Crear la vista con el select menu
-    view = TicketOpenView()
+    view = TicketPanelSelectView()
     
     # Enviar el mensaje al canal
     await interaction.channel.send(embed=embed, view=view)

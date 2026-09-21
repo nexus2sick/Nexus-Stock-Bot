@@ -70,6 +70,7 @@ TICKET_CLOSE_HOURS = 20
 TICKET_PANEL_MESSAGE = """
 BIENVENIDO AL SISTEMA OFICIAL DE SOPORTE DE NEXUS STOCK. ABAJO ELIGE LA OPCIÓN POR LA QUE QUIERAS ABRIR TICKET 👇
 """
+TICKET_PANEL_FOOTER = "NexusStore © Selecciona una de las razones por las cuales abrir ticket abajo."
 
 # Imagen y Banner del Panel de Tickets
 TICKET_PANEL_IMAGE = None  # Sin imagen externa
