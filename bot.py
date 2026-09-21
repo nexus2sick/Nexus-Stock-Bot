@@ -195,6 +195,26 @@ bot = NexusStoreBot()
 
 GIVEAWAYS_FILE = "giveaways.json"
 
+async def get_next_vouch_number(channel) -> int:
+    """Guarda el contador de vouches en el topic del canal para que sobreviva a reinicios de Render."""
+    import re
+    current = 177
+    if channel.topic:
+        match = re.search(r'VOUCH_COUNT:(\d+)', channel.topic)
+        if match:
+            current = int(match.group(1))
+    new_count = current + 1
+    tag = f"VOUCH_COUNT:{new_count}"
+    if channel.topic and re.search(r'VOUCH_COUNT:\d+', channel.topic):
+        new_topic = re.sub(r'VOUCH_COUNT:\d+', tag, channel.topic)
+    else:
+        new_topic = f"{channel.topic + ' ' if channel.topic else ''}{tag}"
+    try:
+        await channel.edit(topic=new_topic)
+    except discord.Forbidden:
+        logger.warning("No tengo permisos para editar el topic del canal de vouches")
+    return new_count
+
 def parse_duration(duration_str: str) -> Optional[int]:
     """Convierte una cadena de duración (ej. 10s, 5m, 2h, 1d) a segundos."""
     import re
@@ -272,7 +292,7 @@ async def register_purchase(guild, user, amount: int = 1):
         title="🛒 COMPRA REGISTRADA",
         description=(
             "> 🔴 **NEXUS STOCK — REPUTACIÓN**\n\n"
-            f"🛒 **{user.display_name}** acaba de realizar una compra en **Nexus Stock**.\n\n"
+            f"🛒 **{user.mention}** acaba de comprar una cuenta.\n\n"
             f"📦 **Cuentas compradas:** `{total}`\n\n"
             "⭐ Gracias por confiar en **Nexus Stock**.\n"
             "Tu compra ha sido registrada correctamente en nuestro sistema.\n\n"
@@ -282,7 +302,7 @@ async def register_purchase(guild, user, amount: int = 1):
     )
     embed.set_thumbnail(url=user.display_avatar.url)
     embed.timestamp = discord.utils.utcnow()
-    await channel.send(embed=embed)
+    await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions(users=True))
 
 class GiveawayView(discord.ui.View):
     def __init__(self):
@@ -447,16 +467,19 @@ class TicketControlView(discord.ui.View):
         except Exception as e:
             await interaction.followup.send(f"Error al eliminar el canal: {e}", ephemeral=True)
 
-def _get_next_ticket_channel_name(guild, prefix: str) -> str:
+def _get_next_ticket_channel_name(guild, base_name: str) -> str:
     existing_names = {
         channel.name.lower()
         for channel in guild.text_channels
         if channel.category and channel.category.name.upper() == "TICKETS"
     }
 
-    number = 1
+    if base_name.lower() not in existing_names:
+        return base_name
+
+    number = 2
     while True:
-        candidate = f"{prefix}-{number}"
+        candidate = f"{base_name}-{number}"
         if candidate.lower() not in existing_names:
             return candidate
         number += 1
@@ -473,6 +496,17 @@ async def _create_ticket_channel(interaction: discord.Interaction, category_key:
         except discord.Forbidden:
             category = None
 
+    # Un solo ticket abierto por persona
+    if category:
+        owner_marker = f"ticket_owner_id:{interaction.user.id}"
+        for existing_channel in category.text_channels:
+            if existing_channel.topic and owner_marker in existing_channel.topic:
+                await interaction.followup.send(
+                    f"⚠️ Ya tienes un ticket abierto en {existing_channel.mention}. Ciérralo antes de abrir otro.",
+                    ephemeral=True
+                )
+                return
+
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
         interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
@@ -486,21 +520,27 @@ async def _create_ticket_channel(interaction: discord.Interaction, category_key:
             overwrites[support_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
     prefix_map = {
-        "comprar_cuenta": "cuenta",
-        "reclamar_drop": "drop",
-        "dudas": "dudas",
-            "partners": "partner",
-            "otra_consulta": "otro"
+        "comprar_cuenta": "Comprar",
+        "reclamar_drop": "Reclamar",
+        "dudas": "Soporte",
+        "partners": "Partner",
+        "otra_consulta": "Otro"
     }
-    prefix = prefix_map.get(category_key, "ticket")
-    channel_name = _get_next_ticket_channel_name(guild, prefix)
+    prefix = prefix_map.get(category_key, "Ticket")
+
+    raw_name_parts = interaction.user.display_name.strip().split()
+    sanitized_name = re.sub(r"[^A-Za-z0-9]", "", raw_name_parts[0]) if raw_name_parts else ""
+    sanitized_name = sanitized_name.capitalize() if sanitized_name else "Usuario"
+
+    base_channel_name = f"{prefix}-{sanitized_name}"
+    channel_name = _get_next_ticket_channel_name(guild, base_channel_name)
 
     try:
         ticket_channel = await guild.create_text_channel(
             name=channel_name,
             category=category,
             overwrites=overwrites,
-            topic=f"Ticket de {interaction.user.name} - Tipo: {category_key}"
+            topic=f"Ticket de {interaction.user.name} - Tipo: {category_key} - ticket_owner_id:{interaction.user.id}"
         )
     except Exception as e:
         await interaction.followup.send(f"No se pudo crear el canal de ticket: {e}", ephemeral=True)
@@ -2183,12 +2223,7 @@ async def vouch(interaction: discord.Interaction, producto: str, comentario: str
     if imagen and (not imagen.content_type or not imagen.content_type.startswith("image/")):
         await interaction.response.send_message("La evidencia debe ser una imagen.", ephemeral=True)
         return
-    vouch_count = 0
-    async for previous_message in channel.history(limit=None):
-        if previous_message.author == bot.user and previous_message.embeds:
-            if previous_message.embeds[0].title == "⭐ NUEVO VOUCH":
-                vouch_count += 1
-    vouch_number = vouch_count + 1
+    vouch_number = await get_next_vouch_number(channel)
     embed = discord.Embed(title="⭐ NUEVO VOUCH", color=config.COLOR_EMBED)
     embed.add_field(name="👤 Cliente", value=interaction.user.mention, inline=False)
     embed.add_field(name="🛒 Producto", value=producto, inline=False)
