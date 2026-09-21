@@ -38,6 +38,31 @@ logging.getLogger('discord.opus').setLevel(logging.CRITICAL + 1)
 # También suprimir warnings de discord que puedan estar relacionados con voz
 logging.getLogger('discord').setLevel(logging.WARNING)
 
+class ChannelRestrictionError(app_commands.CheckFailure):
+    """Se lanza cuando un comando se usa fuera de tickets o del canal de comandos."""
+    pass
+
+class NexusCommandTree(app_commands.CommandTree):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not config.COMMANDS_RESTRICTION_ENABLED or interaction.guild is None:
+            return True
+
+        # El dueño del servidor puede usar comandos en cualquier canal
+        if interaction.user.id == interaction.guild.owner_id:
+            return True
+
+        channel = interaction.channel
+        if channel and getattr(channel, "category", None) and channel.category.name.upper() == "TICKETS":
+            return True
+
+        commands_channel = get_configured_channel(interaction.guild, config.COMMANDS_CHANNEL_ID, config.COMMANDS_CHANNEL_NAME)
+        if commands_channel and channel and channel.id == commands_channel.id:
+            return True
+
+        raise ChannelRestrictionError(
+            f"Los comandos solo pueden usarse en tickets o en {commands_channel.mention if commands_channel else '#' + config.COMMANDS_CHANNEL_NAME}."
+        )
+
 class NexusStoreBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -49,7 +74,8 @@ class NexusStoreBot(commands.Bot):
         super().__init__(
             command_prefix=config.PREFIX,
             intents=intents,
-            help_command=None
+            help_command=None,
+            tree_cls=NexusCommandTree
         )
         
         # Variables para manejo de voz
@@ -166,31 +192,6 @@ class NexusStoreBot(commands.Bot):
             pass
 
 bot = NexusStoreBot()
-
-class ChannelRestrictionError(app_commands.CheckFailure):
-    """Se lanza cuando un comando se usa fuera de tickets o del canal de comandos."""
-    pass
-
-@bot.tree.check
-async def restrict_commands_by_channel(interaction: discord.Interaction) -> bool:
-    if not config.COMMANDS_RESTRICTION_ENABLED or interaction.guild is None:
-        return True
-
-    # El dueño del servidor puede usar comandos en cualquier canal
-    if interaction.user.id == interaction.guild.owner_id:
-        return True
-
-    channel = interaction.channel
-    if channel and getattr(channel, "category", None) and channel.category.name.upper() == "TICKETS":
-        return True
-
-    commands_channel = get_configured_channel(interaction.guild, config.COMMANDS_CHANNEL_ID, config.COMMANDS_CHANNEL_NAME)
-    if commands_channel and channel and channel.id == commands_channel.id:
-        return True
-
-    raise ChannelRestrictionError(
-        f"Los comandos solo pueden usarse en tickets o en {commands_channel.mention if commands_channel else '#' + config.COMMANDS_CHANNEL_NAME}."
-    )
 
 GIVEAWAYS_FILE = "giveaways.json"
 
