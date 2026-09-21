@@ -11,6 +11,7 @@ import time
 import typing
 from typing import Optional
 import aiohttp
+from aiohttp import web
 import json
 from datetime import datetime, timedelta
 import pytz
@@ -119,15 +120,15 @@ class NexusStoreBot(commands.Bot):
         logger.info(f"- {len(self.invite_spam_domains)} dominios de spam de invitaciones")
 
     async def setup_hook(self):
-        app = aiohttp.web.Application()
+        app = web.Application()
 
         async def health_check(request):
-            return aiohttp.web.Response(text="Nexus Store Bot OK")
+            return web.Response(text="Nexus Store Bot OK")
 
         app.router.add_get("/", health_check)
-        self._web_runner = aiohttp.web.AppRunner(app)
+        self._web_runner = web.AppRunner(app)
         await self._web_runner.setup()
-        site = aiohttp.web.TCPSite(
+        site = web.TCPSite(
             self._web_runner,
             "0.0.0.0",
             int(os.getenv("PORT", "10000")),
