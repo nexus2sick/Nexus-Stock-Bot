@@ -35,6 +35,29 @@ MOD_LOG_CHANNEL_NAME = "chat-admins"
 VOUCHES_CHANNEL_ID = 1509359333538791459
 VOUCHES_CHANNEL_NAME = "✅・nexus-vouches"
 
+# Reputación (Nexus Reputation)
+REPUTATION_ENABLED = True
+REPUTATION_CHANNEL_ID = None
+REPUTATION_CHANNEL_NAME = "💎・reputacion"
+
+# Nexus AI Help - Auto-respuestas de preguntas frecuentes
+DROPS_FAQ_ENABLED = True
+DROPS_FAQ_KEYWORDS = ["drop", "drops"]
+DROPS_FAQ_COOLDOWN_SECONDS = 30
+DROPS_FAQ_MESSAGE = """🎁 **¿Cómo funcionan los Drops?**
+
+Los **Drops** son recompensas que se publican en el servidor de **Nexus Stock**.
+
+🔔 Cuando haya un Drop disponible, se anunciará en el canal correspondiente.
+
+🎟️ Si quieres reclamarlo, abre un ticket seleccionando **🎁 Reclamar Drop**.
+
+👤 El Staff verificará tu reclamo y te indicará los siguientes pasos.
+
+⚠️ Cada Drop puede tener condiciones o requisitos diferentes, así que revisa siempre el anuncio del Drop antes de reclamarlo.
+
+🔴 **Nexus Stock — Drops & Rewards**"""
+
 # Moderacion
 MODERATION_ENABLED = True
 PROHIBITED_WORDS = [

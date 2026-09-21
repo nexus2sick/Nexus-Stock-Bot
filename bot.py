@@ -73,6 +73,7 @@ class NexusStoreBot(commands.Bot):
         self.moderation_warnings = {}
         self.owner_mention_counts = {}
         self.recent_bans = {}
+        self.drops_faq_cooldown = {}
         self.ticket_warning_sent = set()
         self._web_runner = None
         
@@ -206,6 +207,56 @@ def save_giveaways(data):
             json.dump(data, f, indent=4, ensure_ascii=False)
     except Exception as e:
         logger.error(f"Error guardando sorteos: {e}")
+
+REPUTATION_FILE = "reputation.json"
+
+def load_reputation():
+    if not os.path.exists(REPUTATION_FILE):
+        return {}
+    try:
+        with open(REPUTATION_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Error cargando reputación: {e}")
+        return {}
+
+def save_reputation(data):
+    try:
+        with open(REPUTATION_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Error guardando reputación: {e}")
+
+async def register_purchase(guild, user, amount: int = 1):
+    """Suma compras al historial de reputación y anuncia el total en el canal correspondiente."""
+    if not config.REPUTATION_ENABLED:
+        return
+    reputation = load_reputation()
+    key = str(user.id)
+    reputation[key] = reputation.get(key, 0) + amount
+    save_reputation(reputation)
+
+    channel = get_configured_channel(guild, config.REPUTATION_CHANNEL_ID, config.REPUTATION_CHANNEL_NAME)
+    if not channel:
+        logger.warning(f"No se encontró el canal de reputación en {guild.name}")
+        return
+
+    total = reputation[key]
+    embed = discord.Embed(
+        title="🛒 COMPRA REGISTRADA",
+        description=(
+            "> 🔴 **NEXUS STOCK — REPUTACIÓN**\n\n"
+            f"🛒 **{user.display_name}** acaba de realizar una compra en **Nexus Stock**.\n\n"
+            f"📦 **Cuentas compradas:** `{total}`\n\n"
+            "⭐ Gracias por confiar en **Nexus Stock**.\n"
+            "Tu compra ha sido registrada correctamente en nuestro sistema.\n\n"
+            "🔴 **Nexus Stock • Trusted Stock**"
+        ),
+        color=config.COLOR_EMBED
+    )
+    embed.set_thumbnail(url=user.display_avatar.url)
+    embed.timestamp = discord.utils.utcnow()
+    await channel.send(embed=embed)
 
 class GiveawayView(discord.ui.View):
     def __init__(self):
@@ -1318,6 +1369,21 @@ async def on_message(message):
     if message.author.bot:
         return
 
+    if config.DROPS_FAQ_ENABLED and message.guild:
+        import re
+        content_lower = message.content.lower()
+        if any(re.search(rf"\b{re.escape(word)}\b", content_lower) for word in config.DROPS_FAQ_KEYWORDS):
+            now = discord.utils.utcnow().timestamp()
+            last_sent = bot.drops_faq_cooldown.get(message.channel.id, 0)
+            if now - last_sent >= config.DROPS_FAQ_COOLDOWN_SECONDS:
+                bot.drops_faq_cooldown[message.channel.id] = now
+                faq_embed = discord.Embed(
+                    description=config.DROPS_FAQ_MESSAGE,
+                    color=config.COLOR_EMBED
+                )
+                faq_embed.set_footer(text="Nexus AI Help • NexusStore © Todos los derechos reservados")
+                await message.channel.send(embed=faq_embed)
+
     if message.guild and message.guild.owner_id in message.raw_mentions and message.author.id != message.guild.owner_id:
         mention_key = (message.guild.id, message.author.id)
         mention_count = bot.owner_mention_counts.get(mention_key, 0) + 1
@@ -1960,6 +2026,63 @@ async def banear(interaction: discord.Interaction, usuario: discord.Member, razo
         ephemeral=True
     )
 
+@bot.tree.command(name="timeout", description="Silencia temporalmente a un usuario")
+@has_admin_role()
+@app_commands.describe(
+    usuario="Usuario que recibirá el timeout",
+    duracion="Duración del timeout (ej. 10m, 2h, 1d)",
+    razon="Motivo del timeout (opcional)"
+)
+async def timeout_cmd(
+    interaction: discord.Interaction,
+    usuario: discord.Member,
+    duracion: str,
+    razon: Optional[str] = "No especificado"
+):
+    """Aplica un timeout temporal a un miembro."""
+    if usuario == interaction.user:
+        await interaction.response.send_message("No puedes ponerte timeout a ti mismo.", ephemeral=True)
+        return
+
+    if usuario == interaction.guild.owner:
+        await interaction.response.send_message("No puedes ponerle timeout al dueño del servidor.", ephemeral=True)
+        return
+
+    bot_member = interaction.guild.me
+    if bot_member and usuario.top_role >= bot_member.top_role:
+        await interaction.response.send_message(
+            "No puedo aplicar timeout a ese usuario porque su rol está igual o por encima del mío.",
+            ephemeral=True
+        )
+        return
+
+    seconds = parse_duration(duracion)
+    if not seconds:
+        await interaction.response.send_message(
+            "Formato de duración inválido. Usa s (segundos), m (minutos), h (horas) o d (días). Ej. `10m`, `2h`.",
+            ephemeral=True
+        )
+        return
+
+    if seconds > 28 * 86400:
+        await interaction.response.send_message("El timeout máximo permitido por Discord es de 28 días.", ephemeral=True)
+        return
+
+    try:
+        await usuario.timeout(
+            timedelta(seconds=seconds),
+            reason=f"{razon} | Moderador: {interaction.user}"
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message("No tengo permisos para aplicar timeout a ese usuario.", ephemeral=True)
+        return
+
+    await send_mod_log(interaction.guild, usuario, f"TIMEOUT {format_vote_duration(seconds)}", razon)
+    await interaction.response.send_message(
+        f"✅ {usuario} recibió timeout por `{format_vote_duration(seconds)}`. Razón: {razon}",
+        ephemeral=True
+    )
+
 @bot.command(name="embed")
 @commands.has_role(config.ADMIN_ROLE_ID)
 async def embed_cmd(ctx, titulo: str, *, resto: str):
@@ -2041,6 +2164,8 @@ async def vouch(interaction: discord.Interaction, producto: str, comentario: str
     embed.set_footer(text=f"NEXUS • Vouch #{vouch_number}")
     embed.timestamp = discord.utils.utcnow()
     await channel.send(content=f"✅ +1 VOUCH {interaction.user.mention}", embed=embed)
+    if "$" in producto or "$" in comentario:
+        await register_purchase(interaction.guild, interaction.user)
     await interaction.response.send_message("✅ Tu vouch fue publicado.", ephemeral=True)
 
 
