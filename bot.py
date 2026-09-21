@@ -6,6 +6,7 @@ from discord import app_commands
 import config
 import asyncio
 import logging
+import os
 import time
 import typing
 from typing import Optional
@@ -77,6 +78,7 @@ class NexusStoreBot(commands.Bot):
         self.invite_spam_tracking = {}  # Tracking de spam de invitaciones
         self.moderation_warnings = {}
         self.ticket_warning_sent = set()
+        self._web_runner = None
         
                 
         # Inicializar bases de datos de seguridad
@@ -115,6 +117,23 @@ class NexusStoreBot(commands.Bot):
         logger.info(f"- {len(self.phishing_links)} dominios de phishing")
         logger.info(f"- {len(self.ip_logger_links)} dominios de IP logger")
         logger.info(f"- {len(self.invite_spam_domains)} dominios de spam de invitaciones")
+
+    async def setup_hook(self):
+        app = aiohttp.web.Application()
+
+        async def health_check(request):
+            return aiohttp.web.Response(text="Nexus Store Bot OK")
+
+        app.router.add_get("/", health_check)
+        self._web_runner = aiohttp.web.AppRunner(app)
+        await self._web_runner.setup()
+        site = aiohttp.web.TCPSite(
+            self._web_runner,
+            "0.0.0.0",
+            int(os.getenv("PORT", "10000")),
+        )
+        await site.start()
+        logger.info("Servidor de salud HTTP iniciado")
     
     async def on_ready(self):
         logger.info(f'Bot conectado como {self.user}')
