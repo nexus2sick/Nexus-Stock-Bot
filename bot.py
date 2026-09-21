@@ -167,6 +167,31 @@ class NexusStoreBot(commands.Bot):
 
 bot = NexusStoreBot()
 
+class ChannelRestrictionError(app_commands.CheckFailure):
+    """Se lanza cuando un comando se usa fuera de tickets o del canal de comandos."""
+    pass
+
+@bot.tree.check
+async def restrict_commands_by_channel(interaction: discord.Interaction) -> bool:
+    if not config.COMMANDS_RESTRICTION_ENABLED or interaction.guild is None:
+        return True
+
+    # El dueño del servidor puede usar comandos en cualquier canal
+    if interaction.user.id == interaction.guild.owner_id:
+        return True
+
+    channel = interaction.channel
+    if channel and getattr(channel, "category", None) and channel.category.name.upper() == "TICKETS":
+        return True
+
+    commands_channel = get_configured_channel(interaction.guild, config.COMMANDS_CHANNEL_ID, config.COMMANDS_CHANNEL_NAME)
+    if commands_channel and channel and channel.id == commands_channel.id:
+        return True
+
+    raise ChannelRestrictionError(
+        f"Los comandos solo pueden usarse en tickets o en {commands_channel.mention if commands_channel else '#' + config.COMMANDS_CHANNEL_NAME}."
+    )
+
 GIVEAWAYS_FILE = "giveaways.json"
 
 def parse_duration(duration_str: str) -> Optional[int]:
@@ -1368,6 +1393,15 @@ async def on_message(message):
     # Ignorar mensajes del bot
     if message.author.bot:
         return
+
+    if message.guild and config.REPUTATION_ENABLED and message.author.id != message.guild.owner_id:
+        reputation_channel = get_configured_channel(message.guild, config.REPUTATION_CHANNEL_ID, config.REPUTATION_CHANNEL_NAME)
+        if reputation_channel and message.channel.id == reputation_channel.id:
+            try:
+                await message.delete()
+            except discord.HTTPException:
+                pass
+            return
 
     if config.DROPS_FAQ_ENABLED and message.guild:
         import re
@@ -3098,6 +3132,22 @@ async def on_command_error(interaction: discord.Interaction, error):
             if "already been acknowledged" in str(error) or "Interaction has already been responded" in str(error):
                 return  # Ignorar silenciosamente
         
+        if isinstance(error, ChannelRestrictionError):
+            embed = discord.Embed(
+                title="Canal no permitido",
+                description=str(error),
+                color=config.COLOR_EMBED
+            )
+            embed.set_footer(text="NexusStore © Todos los derechos reservados")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(embed=embed, ephemeral=True)
+                else:
+                    await interaction.followup.send(embed=embed, ephemeral=True)
+            except:
+                pass
+            return
+
         if isinstance(error, app_commands.CheckFailure):
             # Error de permisos personalizado (nuestro decorador has_admin_role)
             admin_role = interaction.guild.get_role(config.ADMIN_ROLE_ID) if config.ADMIN_ROLE_ID else None

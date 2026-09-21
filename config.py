@@ -35,6 +35,11 @@ MOD_LOG_CHANNEL_NAME = "chat-admins"
 VOUCHES_CHANNEL_ID = 1509359333538791459
 VOUCHES_CHANNEL_NAME = "✅・nexus-vouches"
 
+# Restricción de comandos por canal
+COMMANDS_RESTRICTION_ENABLED = True
+COMMANDS_CHANNEL_ID = None
+COMMANDS_CHANNEL_NAME = "🔧・comandos"
+
 # Reputación (Nexus Reputation)
 REPUTATION_ENABLED = True
 REPUTATION_CHANNEL_ID = None
@@ -77,7 +82,16 @@ PROHIBITED_WORDS = [
 	"welebichos",
 	"me maman el bicho",
 	"mierda",
-	"basura"
+	"basura",
+	"gay",
+	"gai",
+	"gey",
+	"gei",
+	"pato",
+	"patito",
+	"patote",
+	"pajuato",
+	"patin"
 ]  # Agrega aqui las palabras que quieras bloquear
 PROMOTION_WORDS = ["discord.gg/", "discord.com/invite/", "compra", "vendo", "venta"]
 BAD_WORD_TIMEOUT_MINUTES = 10
