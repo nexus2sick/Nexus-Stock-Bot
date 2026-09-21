@@ -7,6 +7,7 @@ import config
 import asyncio
 import logging
 import os
+import re
 import time
 import typing
 from typing import Optional
@@ -330,10 +331,22 @@ class TicketControlView(discord.ui.View):
 
     @discord.ui.button(label="Cerrar Ticket", style=discord.ButtonStyle.primary, custom_id="ticket_close")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user_overwrite = interaction.channel.overwrites_for(interaction.user)
-        is_ticket_owner = user_overwrite.view_channel is True and user_overwrite.send_messages is True
-        if not is_ticket_owner:
-            await interaction.response.send_message("❌ Solo el creador de este ticket puede cerrarlo.", ephemeral=True)
+        allowed_role_names = {"founder", "creator", "admin", "bots", "staff"}
+        user_role_names = {
+            re.sub(r"[^a-z0-9]", "", role.name.lower())
+            for role in interaction.user.roles
+        }
+        can_close_ticket = (
+            interaction.user.id == interaction.guild.owner_id
+            or interaction.user.guild_permissions.administrator
+            or any(
+                allowed_name in role_name
+                for role_name in user_role_names
+                for allowed_name in allowed_role_names
+            )
+        )
+        if not can_close_ticket:
+            await interaction.response.send_message("❌ Solo Owner, Founder, Creator, Admin, Bots o Staff puede cerrar tickets.", ephemeral=True)
             return
         await interaction.response.send_message("🔒 El ticket se cerrará y este canal se eliminará en 5 segundos...")
         # Embed de cierre
@@ -1669,13 +1682,21 @@ async def on_member_join(member):
         # Pequeña espera para asegurar que Discord procese el evento
         await asyncio.sleep(0.5)
         
-        if config.AUTO_ROLE_ID is not None:
-            role = member.guild.get_role(config.AUTO_ROLE_ID)
-            if role:
-                try:
-                    await member.add_roles(role)
-                except discord.Forbidden:
-                    logger.warning(f"No tengo permisos para asignar el rol a {member}")
+        role = member.guild.get_role(config.AUTO_ROLE_ID) if config.AUTO_ROLE_ID is not None else None
+        if role is None:
+            role = discord.utils.find(
+                lambda candidate: candidate.name.strip().casefold() == config.AUTO_ROLE_NAME.casefold(),
+                member.guild.roles
+            )
+        if role:
+            try:
+                await member.add_roles(role, reason="Rol automático al entrar al servidor")
+            except discord.Forbidden:
+                logger.warning(f"No tengo permisos para asignar el rol {role.name} a {member}")
+        else:
+            logger.warning(
+                f"No se encontró el rol automático '{config.AUTO_ROLE_NAME}' en {member.guild.name}"
+            )
 
         welcome_channel = get_configured_channel(member.guild, config.WELCOME_CHANNEL_ID, config.WELCOME_CHANNEL_NAME)
         if welcome_channel:
@@ -1691,10 +1712,8 @@ async def on_member_join(member):
                     f"> Bienvenido/a a **Nexus Stock**, {member.mention}.\n"
                     "> Has entrado a nuestra comunidad oficial.\n"
                     f"📌 Lee las reglas: {rules_mention}\n"
-                    f"🛒 Explora nuestro stock y servicios en {chat_mention}.\n"
                     f"💬 Respeta a los demás miembros en {chat_mention}.\n\n"
                     "⚠️ **Recuerda:** el incumplimiento de las reglas puede resultar en una sanción.\n\n"
-                    f"📖 Ve a leer las reglas en {rules_mention}.\n"
                     f"⭐ Después de comprar, deja tu vouch en {vouches_mention}.\n\n"
                     "**Disfruta tu estadía en Nexus Stock.**"
                 ),
@@ -1733,15 +1752,19 @@ async def on_member_remove(member):
         embed = discord.Embed(
             title="🔻 NEXUS STOCK",
             description=(
-                f"> **{member.display_name}** ha abandonado **Nexus Stock**.\n"
-                "Gracias por haber formado parte de nuestra comunidad.\n"
+                "> 🔻 **NEXUS STOCK**\n\n"
+                f"**{member.display_name}** ha abandonado nuestra comunidad.\n\n"
+                "🖤 Gracias por haber formado parte de **Nexus Stock**.\n\n"
                 "Esperamos volver a verte pronto.\n\n"
-                "🔴 **Nexus Stock — Underground.**"
+                "📩 ¿Necesitas volver a comprar o solicitar soporte?\n\n"
+                "Nuestras puertas siempre estarán abiertas.\n\n"
+                "**— NEXUS STOCK**\n\n"
+                "🔴 *Quality Services • Trusted Community*"
             ),
             color=config.COLOR_EMBED
         )
         embed.set_thumbnail(url=member.display_avatar.url)
-        embed.set_footer(text="NexusStore © Todos los derechos reservados")
+        embed.set_footer(text="Nexus Stock © Todos los derechos reservados")
         embed.timestamp = discord.utils.utcnow()
         await goodbye_channel.send(embed=embed)
     else:
