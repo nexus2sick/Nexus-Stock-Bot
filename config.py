@@ -45,11 +45,26 @@ REPUTATION_ENABLED = True
 REPUTATION_CHANNEL_ID = None
 REPUTATION_CHANNEL_NAME = "💎・reputacion"
 
+# Rangos automáticos por cantidad de compras (solo color/nombre, sin permisos especiales)
+PURCHASE_RANK_ROLES = {
+	3: "🥉 Cliente Bronze",
+	5: "🥈 Cliente Silver",
+	10: "🥇 Cliente Gold",
+	20: "💎 Top Comprador"
+}
+
+# Leaderboard de compradores (solo se publica cuando cambia el Top 10)
+LEADERBOARD_ENABLED = True
+LEADERBOARD_SIZE = 10
+
 # Nexus AI Help - Auto-respuestas de preguntas frecuentes
-DROPS_FAQ_ENABLED = True
-DROPS_FAQ_KEYWORDS = ["drop", "drops"]
-DROPS_FAQ_COOLDOWN_SECONDS = 30
-DROPS_FAQ_MESSAGE = """🎁 **¿Cómo funcionan los Drops?**
+FAQ_ENABLED = True
+FAQ_COOLDOWN_SECONDS = 30
+FAQ_TOPICS = [
+	{
+		"key": "drops",
+		"keywords": ["drop", "drops"],
+		"message": """🎁 **¿Cómo funcionan los Drops?**
 
 Los **Drops** son recompensas que se publican en el servidor de **Nexus Stock**.
 
@@ -62,6 +77,57 @@ Los **Drops** son recompensas que se publican en el servidor de **Nexus Stock**.
 ⚠️ Cada Drop puede tener condiciones o requisitos diferentes, así que revisa siempre el anuncio del Drop antes de reclamarlo.
 
 🔴 **Nexus Stock — Drops & Rewards**"""
+	},
+	{
+		"key": "pago",
+		"keywords": ["como pago", "cómo pago", "como se paga", "cómo se paga", "metodo de pago", "método de pago", "metodos de pago", "métodos de pago", "formas de pago", "donde pago", "dónde pago"],
+		"message": """💳 **¿CÓMO PAGO?**
+
+Para realizar un pago, abre un **ticket de compra** y nuestro equipo te indicará los métodos de pago disponibles y los pasos a seguir. Los métodos de pago están en el canal #payments.
+
+📌 **No envíes ningún pago por métodos o personas que no hayan sido confirmados por el staff de Nexus.**
+
+Una vez realizado el pago, envía captura de que se realizó el pago dentro del ticket para que podamos verificarlo."""
+	},
+	{
+		"key": "garantia",
+		"keywords": ["garantia", "garantía", "hay garantia", "hay garantía", "tiene garantia", "tiene garantía"],
+		"message": """🛡️ **¿HAY GARANTÍA?**
+
+Nexus no ofrece garantía en las cuentas a menos que se indique específicamente en la descripción del producto.
+
+Una vez realizada la compra, cualquier situación que ocurra con la cuenta queda bajo responsabilidad del comprador.
+
+📌 **Importante:** Si una cuenta incluye garantía, el período y las condiciones estarán indicados claramente en la descripción antes de realizar la compra."""
+	},
+	{
+		"key": "info_producto",
+		"keywords": ["donde veo la info", "dónde veo la info", "informacion de la cuenta", "información de la cuenta", "info de la cuenta", "que trae la cuenta", "qué trae la cuenta", "contenido de la cuenta"],
+		"message": """🧾 **INFORMACIÓN DEL PRODUCTO**
+
+Toda la información disponible de una cuenta aparece en su descripción antes de la compra.
+
+Esto puede incluir:
+
+• 📦 Contenido de la cuenta
+• 🛡️ Garantía, si aplica
+• 💰 Precio
+• 🔑 Información incluida
+
+**Lee la descripción completa antes de comprar.**"""
+	},
+	{
+		"key": "origen_cuentas",
+		"keywords": ["de donde sacan las cuentas", "de dónde sacan las cuentas", "de donde sacan cuentas", "como consiguen las cuentas", "cómo consiguen las cuentas", "donde consiguen las cuentas", "dónde consiguen las cuentas"],
+		"message": """🔒 **¿DE DÓNDE SACAN LAS CUENTAS?**
+
+Esa información es **privada** y no podemos revelar detalles sobre nuestros métodos de obtención.
+
+🪄 Es como pedirle a un mago que revele sus trucos... parte del trabajo es mantener el secreto.
+
+Gracias por entender y respetar nuestra privacidad. 🤝"""
+	}
+]
 
 # Moderacion
 MODERATION_ENABLED = True

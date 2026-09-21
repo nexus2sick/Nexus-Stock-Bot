@@ -99,7 +99,7 @@ class NexusStoreBot(commands.Bot):
         self.moderation_warnings = {}
         self.owner_mention_counts = {}
         self.recent_bans = {}
-        self.drops_faq_cooldown = {}
+        self.faq_cooldown = {}
         self.ticket_warning_sent = set()
         self._web_runner = None
         
@@ -273,11 +273,67 @@ def save_reputation(data):
     except Exception as e:
         logger.error(f"Error guardando reputación: {e}")
 
+async def apply_purchase_rank(guild, member, total: int):
+    """Asigna el rol de rango más alto alcanzado según el total de compras."""
+    tiers = sorted(config.PURCHASE_RANK_ROLES.items())
+    achieved_name = None
+    for threshold, role_name in tiers:
+        if total >= threshold:
+            achieved_name = role_name
+    if not achieved_name:
+        return
+
+    all_tier_names = {name for _, name in tiers}
+    target_role = discord.utils.get(guild.roles, name=achieved_name)
+    if not target_role:
+        logger.warning(f"No se encontró el rol de rango '{achieved_name}' en {guild.name}")
+        return
+
+    roles_to_remove = [role for role in member.roles if role.name in all_tier_names and role.name != achieved_name]
+    try:
+        if roles_to_remove:
+            await member.remove_roles(*roles_to_remove, reason="Actualización de rango por compras")
+        if target_role not in member.roles:
+            await member.add_roles(target_role, reason="Rango alcanzado por compras")
+    except discord.Forbidden:
+        logger.warning(f"No tengo permisos para asignar rangos por compras a {member}")
+
+def _top_purchasers(reputation: dict, limit: int):
+    return sorted(reputation.items(), key=lambda item: item[1], reverse=True)[:limit]
+
+async def maybe_announce_leaderboard(guild, channel, reputation_before: dict, reputation_after: dict):
+    if not config.LEADERBOARD_ENABLED:
+        return
+    limit = config.LEADERBOARD_SIZE
+    before_ids = [uid for uid, _ in _top_purchasers(reputation_before, limit)]
+    after_top = _top_purchasers(reputation_after, limit)
+    after_ids = [uid for uid, _ in after_top]
+    if before_ids == after_ids:
+        return
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for index, (uid, count) in enumerate(after_top, start=1):
+        member = guild.get_member(int(uid))
+        display = member.mention if member else f"Usuario ({uid})"
+        rank_icon = medals[index - 1] if index <= 3 else f"`#{index}`"
+        lines.append(f"{rank_icon} {display} — **{count}** cuentas")
+
+    embed = discord.Embed(
+        title="🏆 TOP COMPRADORES — NEXUS STOCK",
+        description="\n".join(lines) if lines else "Aún no hay compras registradas.",
+        color=config.COLOR_EMBED
+    )
+    embed.set_footer(text="Nexus Stock © Todos los derechos reservados")
+    embed.timestamp = discord.utils.utcnow()
+    await channel.send(embed=embed)
+
 async def register_purchase(guild, user, amount: int = 1):
     """Suma compras al historial de reputación y anuncia el total en el canal correspondiente."""
     if not config.REPUTATION_ENABLED:
         return
-    reputation = load_reputation()
+    reputation_before = load_reputation()
+    reputation = dict(reputation_before)
     key = str(user.id)
     reputation[key] = reputation.get(key, 0) + amount
     save_reputation(reputation)
@@ -303,6 +359,11 @@ async def register_purchase(guild, user, amount: int = 1):
     embed.set_thumbnail(url=user.display_avatar.url)
     embed.timestamp = discord.utils.utcnow()
     await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions(users=True))
+
+    if isinstance(user, discord.Member):
+        await apply_purchase_rank(guild, user, total)
+
+    await maybe_announce_leaderboard(guild, channel, reputation_before, reputation)
 
 class GiveawayView(discord.ui.View):
     def __init__(self):
@@ -1444,20 +1505,32 @@ async def on_message(message):
                 pass
             return
 
-    if config.DROPS_FAQ_ENABLED and message.guild:
-        import re
+    if config.FAQ_ENABLED and message.guild:
         content_lower = message.content.lower()
-        if any(re.search(rf"\b{re.escape(word)}\b", content_lower) for word in config.DROPS_FAQ_KEYWORDS):
+        for topic in config.FAQ_TOPICS:
+            matched = False
+            for keyword in topic["keywords"]:
+                if " " in keyword:
+                    matched = keyword in content_lower
+                else:
+                    matched = bool(re.search(rf"\b{re.escape(keyword)}\b", content_lower))
+                if matched:
+                    break
+            if not matched:
+                continue
+
+            cooldown_key = (message.channel.id, topic["key"])
             now = discord.utils.utcnow().timestamp()
-            last_sent = bot.drops_faq_cooldown.get(message.channel.id, 0)
-            if now - last_sent >= config.DROPS_FAQ_COOLDOWN_SECONDS:
-                bot.drops_faq_cooldown[message.channel.id] = now
+            last_sent = bot.faq_cooldown.get(cooldown_key, 0)
+            if now - last_sent >= config.FAQ_COOLDOWN_SECONDS:
+                bot.faq_cooldown[cooldown_key] = now
                 faq_embed = discord.Embed(
-                    description=config.DROPS_FAQ_MESSAGE,
+                    description=topic["message"],
                     color=config.COLOR_EMBED
                 )
                 faq_embed.set_footer(text="Nexus AI Help • NexusStore © Todos los derechos reservados")
                 await message.channel.send(embed=faq_embed)
+            break
 
     if message.guild and message.guild.owner_id in message.raw_mentions and message.author.id != message.guild.owner_id:
         mention_key = (message.guild.id, message.author.id)
@@ -2237,6 +2310,31 @@ async def vouch(interaction: discord.Interaction, producto: str, comentario: str
     if "$" in producto or "$" in comentario:
         await register_purchase(interaction.guild, interaction.user)
     await interaction.response.send_message("✅ Tu vouch fue publicado.", ephemeral=True)
+
+@bot.tree.command(name="top_compradores", description="Muestra el top de compradores de Nexus Stock")
+async def top_compradores(interaction: discord.Interaction):
+    reputation = load_reputation()
+    top = _top_purchasers(reputation, config.LEADERBOARD_SIZE)
+    if not top:
+        await interaction.response.send_message("Todavía no hay compras registradas.", ephemeral=True)
+        return
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for index, (uid, count) in enumerate(top, start=1):
+        member = interaction.guild.get_member(int(uid))
+        display = member.mention if member else f"Usuario ({uid})"
+        rank_icon = medals[index - 1] if index <= 3 else f"`#{index}`"
+        lines.append(f"{rank_icon} {display} — **{count}** cuentas")
+
+    embed = discord.Embed(
+        title="🏆 TOP COMPRADORES — NEXUS STOCK",
+        description="\n".join(lines),
+        color=config.COLOR_EMBED
+    )
+    embed.set_footer(text="Nexus Stock © Todos los derechos reservados")
+    embed.timestamp = discord.utils.utcnow()
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="enviar_embed", description="Envía un embed al canal actual con estilo NexusStore")
