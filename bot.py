@@ -72,6 +72,7 @@ class NexusStoreBot(commands.Bot):
         self.invite_spam_tracking = {}  # Tracking de spam de invitaciones
         self.moderation_warnings = {}
         self.owner_mention_counts = {}
+        self.recent_bans = {}
         self.ticket_warning_sent = set()
         self._web_runner = None
         
@@ -1749,22 +1750,39 @@ async def on_member_join(member):
 async def on_member_remove(member):
     goodbye_channel = get_configured_channel(member.guild, config.GOODBYE_CHANNEL_ID, config.GOODBYE_CHANNEL_NAME)
     if goodbye_channel:
-        embed = discord.Embed(
-            title="🔻 NEXUS STOCK",
-            description=(
-                "> 🔻 **NEXUS STOCK**\n\n"
-                f"**{member.display_name}** ha abandonado nuestra comunidad.\n\n"
-                "🖤 Gracias por haber formado parte de **Nexus Stock**.\n\n"
-                "Esperamos volver a verte pronto.\n\n"
-                "📩 ¿Necesitas volver a comprar o solicitar soporte?\n\n"
-                "Nuestras puertas siempre estarán abiertas.\n\n"
-                "**— NEXUS STOCK**\n\n"
-                "🔴 *Quality Services • Trusted Community*"
-            ),
-            color=config.COLOR_EMBED
-        )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.set_footer(text="Nexus Stock © Todos los derechos reservados")
+        ban_data = bot.recent_bans.pop((member.guild.id, member.id), None)
+        if ban_data:
+            embed = discord.Embed(
+                title="🔨 USUARIO BANEADO",
+                description=(
+                    f"> **Usuario:** `{member}`\n"
+                    f"> **ID:** `{member.id}`\n"
+                    f"> **Razón:** `{ban_data['reason']}`\n"
+                    f"> **Moderador:** `{ban_data['moderator']}`\n\n"
+                    "⛔ El usuario ha sido **baneado permanentemente** del servidor.\n\n"
+                    "**NEXUS STOCK** • Sistema de Moderación"
+                ),
+                color=config.COLOR_EMBED
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.set_footer(text="Nexus Stock © Todos los derechos reservados")
+        else:
+            embed = discord.Embed(
+                title="🔻 NEXUS STOCK",
+                description=(
+                    "> 🔻 **NEXUS STOCK**\n\n"
+                    f"**{member.display_name}** ha abandonado nuestra comunidad.\n\n"
+                    "🖤 Gracias por haber formado parte de **Nexus Stock**.\n\n"
+                    "Esperamos volver a verte pronto.\n\n"
+                    "📩 ¿Necesitas volver a comprar o solicitar soporte?\n\n"
+                    "Nuestras puertas siempre estarán abiertas.\n\n"
+                    "**— NEXUS STOCK**\n\n"
+                    "🔴 *Quality Services • Trusted Community*"
+                ),
+                color=config.COLOR_EMBED
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
+            embed.set_footer(text="Nexus Stock © Todos los derechos reservados")
         embed.timestamp = discord.utils.utcnow()
         await goodbye_channel.send(embed=embed)
     else:
@@ -1901,6 +1919,46 @@ async def publicar_reglas(interaction: discord.Interaction):
         allowed_mentions=discord.AllowedMentions(everyone=True)
     )
     await interaction.response.send_message("Reglas publicadas correctamente.", ephemeral=True)
+
+@bot.tree.command(name="banear", description="Banea permanentemente a un usuario del servidor")
+@has_admin_role()
+@app_commands.describe(usuario="Usuario que será baneado", razon="Motivo del baneo")
+async def banear(interaction: discord.Interaction, usuario: discord.Member, razon: str):
+    """Banea a un miembro y prepara el aviso en el canal de despedidas."""
+    if usuario == interaction.user:
+        await interaction.response.send_message("No puedes banearte a ti mismo.", ephemeral=True)
+        return
+
+    if usuario == interaction.guild.owner:
+        await interaction.response.send_message("No puedes banear al dueño del servidor.", ephemeral=True)
+        return
+
+    bot_member = interaction.guild.me
+    if bot_member and usuario.top_role >= bot_member.top_role:
+        await interaction.response.send_message(
+            "No puedo banear a ese usuario porque su rol está igual o por encima del mío.",
+            ephemeral=True
+        )
+        return
+
+    bot.recent_bans[(interaction.guild.id, usuario.id)] = {
+        "reason": razon,
+        "moderator": interaction.user,
+    }
+    try:
+        await usuario.ban(reason=f"{razon} | Moderador: {interaction.user}")
+    except discord.Forbidden:
+        bot.recent_bans.pop((interaction.guild.id, usuario.id), None)
+        await interaction.response.send_message(
+            "No tengo permisos para banear a ese usuario.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"✅ {usuario} fue baneado permanentemente. El aviso se publicó en despedidas.",
+        ephemeral=True
+    )
 
 @bot.command(name="embed")
 @commands.has_role(config.ADMIN_ROLE_ID)
