@@ -57,6 +57,8 @@ PROHIBITED_WORDS = [
 ]  # Agrega aqui las palabras que quieras bloquear
 PROMOTION_WORDS = ["discord.gg/", "discord.com/invite/", "compra", "vendo", "venta"]
 BAD_WORD_TIMEOUT_MINUTES = 10
+PROMOTION_FIRST_TIMEOUT_MINUTES = 5
+PROMOTION_SECOND_TIMEOUT_MINUTES = 10
 PROMOTION_WARNINGS_BEFORE_BAN = 3
 
 # Tickets: aviso a las 15 horas y cierre a las 20 horas sin actividad

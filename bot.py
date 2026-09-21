@@ -397,7 +397,8 @@ async def _create_ticket_channel(interaction: discord.Interaction, category_key:
         "comprar_cuenta": "cuenta",
         "reclamar_drop": "drop",
         "dudas": "dudas",
-        "partners": "partner"
+            "partners": "partner",
+            "otra_consulta": "otro"
     }
     prefix = prefix_map.get(category_key, "ticket")
     channel_name = _get_next_ticket_channel_name(guild, prefix)
@@ -413,14 +414,45 @@ async def _create_ticket_channel(interaction: discord.Interaction, category_key:
         await interaction.followup.send(f"No se pudo crear el canal de ticket: {e}", ephemeral=True)
         return
 
-    embed = discord.Embed(
-        title="Welcome to Nexus Store support.",
-        description=(
-            f"**Our support team will assist you as soon as possible with your ticket.**"
-            f"`Opened By:` {interaction.user.mention}"
+    ticket_messages = {
+        "reclamar_drop": (
+            "🔴 **NEXUS STOCK — DROP**\n\n"
+            f"> 👤 **{interaction.user.mention}** viene a reclamar su **drop**.\n"
+            "🎁 Por favor, espera a que un miembro del Staff atienda tu ticket.\n\n"
+            "📌 Ten preparado cualquier información necesaria para verificar tu reclamo.\n\n"
+            "**Nexus Stock — Ticket System**"
         ),
+        "comprar_cuenta": (
+            "🔴 **NEXUS STOCK — COMPRA**\n\n"
+            f"> 👤 **{interaction.user.mention}** ha abierto un ticket relacionado con una **compra**.\n"
+            "🛒 Un miembro del Staff revisará tu solicitud lo antes posible.\n\n"
+            "📌 Mantén toda la información relacionada con tu compra dentro del ticket.\n\n"
+            "**Nexus Stock — Ticket System**"
+        ),
+        "dudas": (
+            "🔴 **NEXUS STOCK — SOPORTE**\n\n"
+            f"> 🔧 **{interaction.user.mention}** viene a solicitar **soporte**.\n"
+            "📌 **Información**\n"
+            "Explica detalladamente el problema que estás teniendo para que un miembro del Staff pueda ayudarte.\n\n"
+            "⏳ **Estado:** Esperando atención del Staff.\n\n"
+            "⚠️ Evita hacer spam o mencionar repetidamente al Staff. Serás atendido cuando esté disponible.\n\n"
+            "**Nexus Stock — Ticket System**"
+        ),
+        "otra_consulta": (
+            "🔴 **NEXUS STOCK — OTRO**\n\n"
+            f"> 📩 **{interaction.user.mention}** ha abierto un ticket para una **consulta o asunto diferente**.\n"
+            "📌 **Información**\n"
+            "Explica claramente el motivo de tu ticket para que un miembro del Staff pueda ayudarte.\n\n"
+            "⏳ **Estado:** Esperando atención del Staff.\n\n"
+            "⚠️ Evita abrir tickets innecesarios o hacer spam.\n\n"
+            "**Nexus Stock — Ticket System**"
+        )
+    }
+    embed = discord.Embed(
+        description=ticket_messages.get(category_key, ticket_messages["otra_consulta"]),
         color=config.COLOR_EMBED
     )
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
     embed.set_footer(text="NexusStore © Todos los derechos reservados")
     embed.timestamp = discord.utils.utcnow()
 
@@ -540,6 +572,10 @@ class TicketOpenView(discord.ui.View):
     @discord.ui.button(label="RECLAMAR UN DROP", emoji="🎁", style=discord.ButtonStyle.secondary, custom_id="ticket_drop")
     async def drop_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._open_ticket(interaction, "reclamar_drop")
+
+    @discord.ui.button(label="OTRO", emoji="🛠️", style=discord.ButtonStyle.secondary, custom_id="ticket_other")
+    async def other_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._open_ticket(interaction, "otra_consulta")
 
 @bot.event
 async def on_ready():
@@ -1083,9 +1119,10 @@ def get_configured_channel(guild, channel_id, channel_name):
     channel = discord.utils.get(guild.text_channels, name=channel_name)
     if channel:
         return channel
-    normalized_name = channel_name.lower().replace("✅", "").replace("⭐", "").replace("・", "").replace("-", "")
+    import re
+    normalized_name = re.sub(r"[^a-z0-9]", "", channel_name.lower())
     for candidate in guild.text_channels:
-        normalized_candidate = candidate.name.lower().replace("✅", "").replace("⭐", "").replace("・", "").replace("-", "")
+        normalized_candidate = re.sub(r"[^a-z0-9]", "", candidate.name.lower())
         if normalized_name in normalized_candidate:
             return candidate
     return None
@@ -1171,9 +1208,21 @@ async def moderate_message(message):
                 await message.author.ban(reason="Promoción no autorizada: tercera sanción")
                 action = "BAN PERMANENTE"
             except discord.Forbidden:
-                action = "WARN 3 (sin permiso para banear)"
+                action = "BAN FALLIDO (sin permiso para banear)"
         else:
-            action = f"WARN {warnings}/3"
+            timeout_minutes = (
+                config.PROMOTION_FIRST_TIMEOUT_MINUTES
+                if warnings == 1
+                else config.PROMOTION_SECOND_TIMEOUT_MINUTES
+            )
+            try:
+                await message.author.timeout(
+                    timedelta(minutes=timeout_minutes),
+                    reason=f"Promoción no autorizada: sanción {warnings}/3"
+                )
+                action = f"TIMEOUT {timeout_minutes} MIN"
+            except discord.Forbidden:
+                action = f"TIMEOUT FALLIDO {timeout_minutes} MIN (sin permiso)"
 
         sanction_embed = discord.Embed(
             title="🚫 NEXUS STOCK — SANCIÓN",
@@ -1592,6 +1641,11 @@ async def on_member_join(member):
                 embed=embed,
                 allowed_mentions=discord.AllowedMentions(users=True)
             )
+        else:
+            logger.warning(
+                f"No se encontró el canal de bienvenida en {member.guild.name}. "
+                f"Nombre configurado: {config.WELCOME_CHANNEL_NAME}"
+            )
         
         # Mensaje de invitaciones desactivado
         # try:
@@ -1624,6 +1678,11 @@ async def on_member_remove(member):
         embed.set_footer(text="NexusStore © Todos los derechos reservados")
         embed.timestamp = discord.utils.utcnow()
         await goodbye_channel.send(embed=embed)
+    else:
+        logger.warning(
+            f"No se encontró el canal de despedidas en {member.guild.name}. "
+            f"Nombre configurado: {config.GOODBYE_CHANNEL_NAME}"
+        )
 
 async def get_inviter(member):
     """Obtiene información sobre quién invitó al miembro"""
