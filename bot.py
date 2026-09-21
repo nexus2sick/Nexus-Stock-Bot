@@ -18,17 +18,9 @@ import pytz
 import random
 
 def has_admin_role():
-    """Decorador personalizado para verificar si el usuario tiene el rol de administrador"""
+    """Permite comandos administrativos únicamente al dueño del servidor."""
     async def predicate(interaction: discord.Interaction):
-        if config.ADMIN_ROLE_ID is None:
-            return True  # Si no hay rol configurado, permitir a todos
-        
-        # Verificar si el usuario tiene el rol
-        role = interaction.guild.get_role(config.ADMIN_ROLE_ID)
-        if role is None:
-            return False
-            
-        return role in interaction.user.roles
+        return interaction.guild is not None and interaction.user.id == interaction.guild.owner_id
     return app_commands.check(predicate)
 
 # Configurar logging limpio y silencioso para errores de voz
@@ -1094,7 +1086,7 @@ def get_configured_channel(guild, channel_id, channel_name):
     normalized_name = channel_name.lower().replace("✅", "").replace("⭐", "").replace("・", "").replace("-", "")
     for candidate in guild.text_channels:
         normalized_candidate = candidate.name.lower().replace("✅", "").replace("⭐", "").replace("・", "").replace("-", "")
-        if normalized_name in normalized_candidate or "nexusvouches" in normalized_candidate:
+        if normalized_name in normalized_candidate:
             return candidate
     return None
 
@@ -1900,16 +1892,9 @@ async def send_embed(
         await interaction.followup.send(error_embed, ephemeral=True)
 
 def has_admin_role_prefix():
-    """Decorador para verificar el rol de administrador en comandos de prefijo"""
+    """Restringe los comandos de prefijo al dueño del servidor."""
     async def predicate(ctx):
-        if config.ADMIN_ROLE_ID is None:
-            return True  # Si no hay rol configurado, permitir a todos
-        
-        role = ctx.guild.get_role(config.ADMIN_ROLE_ID)
-        if role is None:
-            return False
-            
-        return role in ctx.author.roles
+        return ctx.guild is not None and ctx.author.id == ctx.guild.owner_id
     return commands.check(predicate)
 
 
@@ -2551,6 +2536,7 @@ async def clear_user_messages(interaction: discord.Interaction, usuario: discord
 
 # Comandos de Versículos Diarios
 @bot.tree.command(name="versiculo_hoy", description="Muestra el versículo del día")
+@app_commands.checks.cooldown(1, 60.0, key=lambda interaction: interaction.user.id)
 async def versiculo_hoy(interaction: discord.Interaction):
     """Muestra el versículo del día actual"""
     await interaction.response.defer()
@@ -2583,6 +2569,7 @@ async def versiculo_hoy(interaction: discord.Interaction):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="versiculo_aleatorio", description="Muestra un versículo aleatorio")
+@app_commands.checks.cooldown(1, 60.0, key=lambda interaction: interaction.user.id)
 async def versiculo_aleatorio(interaction: discord.Interaction):
     """Muestra un versículo aleatorio de la Biblia"""
     await interaction.response.defer()

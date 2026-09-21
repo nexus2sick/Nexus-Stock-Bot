@@ -30,7 +30,7 @@ ADMIN_ROLE_ID = None  # Rol requerido para comandos de admin
 SUPPORT_ROLE_ID = None
 AUTO_ROLE_ID = None  # Rol que se asigna automáticamente al entrar
 MOD_LOG_CHANNEL_ID = None
-MOD_LOG_CHANNEL_NAME = "🛡️・mod-logs"
+MOD_LOG_CHANNEL_NAME = "chat-admins"
 VOUCHES_CHANNEL_ID = 1509359333538791459
 VOUCHES_CHANNEL_NAME = "✅・nexus-vouches"
 
