@@ -70,6 +70,7 @@ class NexusStoreBot(commands.Bot):
         self.ip_logger_links = set()  # Base de datos de IP loggers
         self.invite_spam_tracking = {}  # Tracking de spam de invitaciones
         self.moderation_warnings = {}
+        self.owner_mention_counts = {}
         self.ticket_warning_sent = set()
         self._web_runner = None
         
@@ -1302,6 +1303,45 @@ async def on_message(message):
     # Ignorar mensajes del bot
     if message.author.bot:
         return
+
+    if message.guild and message.guild.owner_id in message.raw_mentions and message.author.id != message.guild.owner_id:
+        mention_key = (message.guild.id, message.author.id)
+        mention_count = bot.owner_mention_counts.get(mention_key, 0) + 1
+        bot.owner_mention_counts[mention_key] = mention_count
+
+        if mention_count in (2, 3):
+            sanction_text = ""
+            if mention_count == 3:
+                try:
+                    await message.author.timeout(
+                        timedelta(minutes=5),
+                        reason="Menciones repetidas al Owner"
+                    )
+                    sanction_text = "\n🚨 **Sanción aplicada:** `TIMEOUT 5 MIN`\n"
+                    await send_mod_log(message.guild, message.author, "TIMEOUT 5 MIN", "Menciones repetidas al Owner")
+                except discord.Forbidden:
+                    sanction_text = "\n🚨 **Sanción aplicada:** `TIMEOUT FALLIDO (sin permisos)`\n"
+
+            warning_embed = discord.Embed(
+                title="⚠️ NEXUS STOCK — ADVERTENCIA",
+                description=(
+                    f"> **{message.author.mention}**, has mencionado al Owner varias veces.\n"
+                    "📌 El **Owner revisará tu mensaje cuando pueda**.\n"
+                    "🔔 **Mencionarlo una sola vez es más que suficiente.**\n\n"
+                    "⚠️ Evita repetir las menciones innecesariamente.\n\n"
+                    "🚨 **A la tercera mención:** se aplicará una **sanción de 5 minutos**.\n"
+                    f"{sanction_text}\n"
+                    "🔴 **Nexus Stock Staff**"
+                ),
+                color=config.COLOR_EMBED
+            )
+            warning_embed.set_thumbnail(url=message.author.display_avatar.url)
+            warning_embed.set_footer(text="NexusStore © Todos los derechos reservados")
+            warning_embed.timestamp = discord.utils.utcnow()
+            await message.channel.send(
+                embed=warning_embed,
+                allowed_mentions=discord.AllowedMentions(users=True)
+            )
 
     if await moderate_message(message):
         return
