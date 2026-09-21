@@ -10,6 +10,10 @@ COLOR_EMBED = 0x8B0000  # Color rojo oscuro #0x8B0000
 # Configuración de Bienvenida
 WELCOME_CHANNEL_ID = None  # ID del canal donde se enviarán los mensajes de bienvenida
 WELCOME_CHANNEL_NAME = "👋・bienvenidas"
+RULES_CHANNEL_ID = None  # ID del canal donde están las reglas
+RULES_CHANNEL_NAME = "📜・reglas"
+CHAT_CHANNEL_ID = 1509359333140594768
+CHAT_CHANNEL_NAME = "💬・chat"
 GOODBYE_CHANNEL_ID = None
 GOODBYE_CHANNEL_NAME = "👋・despedidas"
 BOOST_CHANNEL_ID = None  # ID del canal para notificaciones de boost
@@ -27,13 +31,15 @@ SUPPORT_ROLE_ID = None
 AUTO_ROLE_ID = None  # Rol que se asigna automáticamente al entrar
 MOD_LOG_CHANNEL_ID = None
 MOD_LOG_CHANNEL_NAME = "🛡️・mod-logs"
-VOUCHES_CHANNEL_ID = None
+VOUCHES_CHANNEL_ID = 1509359333538791459
 VOUCHES_CHANNEL_NAME = "✅・nexus-vouches"
 
 # Moderacion
 MODERATION_ENABLED = True
 PROHIBITED_WORDS = [
 	"cabron",
+	"puto",
+	"puta",
 	"cb",
 	"mamabicho",
 	"mmb",
@@ -60,17 +66,64 @@ TICKET_CLOSE_HOURS = 20
 
 # Mensaje del Panel de Tickets
 TICKET_PANEL_MESSAGE = """
-Welcome to **Nexus Store** support.
-
-Choose the area that best fits your query in the menu below so we can assist you as quickly and efficiently as possible.
-
-Important:
-Open a ticket if you have a real question, want to make a purchase, or have a pending case to resolve. Avoid opening unnecessary tickets to avoid penalties.
+BIENVENIDO AL SISTEMA OFICIAL DE SOPORTE DE NEXUS STOCK. ABAJO ELIGE LA OPCIÓN POR LA QUE QUIERAS ABRIR TICKET 👇
 """
 
 # Imagen y Banner del Panel de Tickets
 TICKET_PANEL_IMAGE = None  # Sin imagen externa
 TICKET_PANEL_BANNER = None  # Sin banner externo
+
+RULES_MESSAGE = """# 🔴 REGLAS OFICIALES — NEXUS STOCK 🔴
+
+> Aquí venimos a comprar tranquilos, no a formar revolú. Romper las reglas puede terminar en **mute, aislamiento o baneo sin aviso**.
+
+### 1️⃣ Respeto obligatorio 🤝
+
+Nada de insultos serios, amenazas, acoso, discrimen ni buscar peleas. El vacilón está permitido, pero si te piden que pares, **paras**.
+
+### 2️⃣ Cero publicidad ❌
+
+No promociones servidores, tiendas, productos, servicios, redes ni enlaces sin autorización. Tampoco vengas a pescar clientes.
+
+### 3️⃣ No tires DM 📩
+
+Está prohibido escribirles a miembros para vender, promocionar, molestar o intentar estafar. Si recibes un DM sospechoso, toma captura y abre un ticket.
+
+### 4️⃣ No vendas por tu cuenta 💰
+
+Solo **Nexus Stock** y vendedores autorizados pueden vender. No publiques ventas, intercambios ni intentes cerrar negocios escondidos por DM.
+
+### 5️⃣ Usa cada canal correctamente 📂
+
+Habla y comenta en <#1509359333140594768>.
+<#1509359333538791459> es **solo para vouches reales**, no para conversar.
+Para ayuda, abre ticket en <#1509367067269136414>.
+
+### 6️⃣ Nada de spam 🚫
+
+No hagas spam de mensajes, emojis, menciones, comandos o imágenes. No abuses de los bots ni etiquetes al staff innecesariamente.
+
+### 7️⃣ Cero estafas 🚨
+
+Comprobantes falsos, suplantación, vouches inventados o cualquier intento de estafa resultan en **baneo permanente**.
+
+### 8️⃣ Soporte por tickets 🎫
+
+No molestes a owners o administradores por privado. Abre un ticket y espera tu turno, mi pana.
+
+### 9️⃣ Español en los chats 🇵🇷
+
+Habla español, excepto en canales destinados a otro idioma.
+
+### 🔟 Usa el sentido común 🧠
+
+Que algo no aparezca escrito aquí no significa que esté permitido. No te hagas el loco.
+
+> Las reglas pueden cambiar. Permanecer en el servidor significa que las aceptas.
+
+🔴 **Respeta, no promociones, no tires DM y no vendas por tu cuenta.**
+
+@everyone"""
 
 # Métodos de Pago
 PAY_METHODS_TITLE = "**NEXUSFN v1.0.0**"

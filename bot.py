@@ -337,13 +337,10 @@ class TicketControlView(discord.ui.View):
 
     @discord.ui.button(label="Cerrar Ticket", style=discord.ButtonStyle.primary, custom_id="ticket_close")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        staff_role = interaction.guild.get_role(config.SUPPORT_ROLE_ID) if config.SUPPORT_ROLE_ID else None
-        admin_role = interaction.guild.get_role(config.ADMIN_ROLE_ID) if config.ADMIN_ROLE_ID else None
-        is_staff = (staff_role and staff_role in interaction.user.roles) or (admin_role and admin_role in interaction.user.roles)
         user_overwrite = interaction.channel.overwrites_for(interaction.user)
         is_ticket_owner = user_overwrite.view_channel is True and user_overwrite.send_messages is True
-        if not (is_staff or is_ticket_owner):
-            await interaction.response.send_message("❌ Solo el creador del ticket o el staff puede cerrarlo.", ephemeral=True)
+        if not is_ticket_owner:
+            await interaction.response.send_message("❌ Solo el creador de este ticket puede cerrarlo.", ephemeral=True)
             return
         await interaction.response.send_message("🔒 El ticket se cerrará y este canal se eliminará en 5 segundos...")
         # Embed de cierre
@@ -537,14 +534,20 @@ class TicketOpenView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="ABRIR-TICKET", emoji="🎫", style=discord.ButtonStyle.danger, custom_id="ticket_open")
-    async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title="Abrir Ticket de Soporte",
-            description="Selecciona una opción para que podamos ayudarte.",
-            color=config.COLOR_EMBED
-        )
-        await interaction.response.send_message(embed=embed, view=TicketDropdownView(), ephemeral=True)
+    async def _open_ticket(self, interaction: discord.Interaction, category_key: str):
+        await _create_ticket_channel(interaction, category_key)
+
+    @discord.ui.button(label="COMPRAR CUENTA", emoji="🛒", style=discord.ButtonStyle.secondary, custom_id="ticket_buy")
+    async def buy_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._open_ticket(interaction, "comprar_cuenta")
+
+    @discord.ui.button(label="DUDAS O PREGUNTAS", emoji="❓", style=discord.ButtonStyle.secondary, custom_id="ticket_questions")
+    async def questions_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._open_ticket(interaction, "dudas")
+
+    @discord.ui.button(label="RECLAMAR UN DROP", emoji="🎁", style=discord.ButtonStyle.secondary, custom_id="ticket_drop")
+    async def drop_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._open_ticket(interaction, "reclamar_drop")
 
 @bot.event
 async def on_ready():
@@ -1144,6 +1147,23 @@ async def moderate_message(message):
             action = "TIMEOUT 10 MIN"
         except discord.Forbidden:
             action = "WARN (sin permiso para timeout)"
+        sanction_embed = discord.Embed(
+            title="🚫 NEXUS STOCK — SANCIÓN",
+            description=(
+                f"> **{message.author.mention}**, tu mensaje ha sido eliminado por utilizar lenguaje prohibido.\n"
+                f"⚠️ **Sanción aplicada:** `{action}`\n\n"
+                "Mantén el respeto dentro de la comunidad. La reincidencia puede aumentar la sanción.\n\n"
+                "🔴 **Nexus Stock Staff**"
+            ),
+            color=config.COLOR_EMBED
+        )
+        sanction_embed.set_thumbnail(url=message.author.display_avatar.url)
+        sanction_embed.set_footer(text="NexusStore © Todos los derechos reservados")
+        sanction_embed.timestamp = discord.utils.utcnow()
+        await message.channel.send(
+            embed=sanction_embed,
+            allowed_mentions=discord.AllowedMentions(users=True)
+        )
         await send_mod_log(message.guild, message.author, action, "Palabra prohibida")
         return True
     if matched_promotion:
@@ -1162,6 +1182,26 @@ async def moderate_message(message):
                 action = "WARN 3 (sin permiso para banear)"
         else:
             action = f"WARN {warnings}/3"
+
+        sanction_embed = discord.Embed(
+            title="🚫 NEXUS STOCK — SANCIÓN",
+            description=(
+                f"> **{message.author.mention}**, tu mensaje ha sido eliminado automáticamente.\n"
+                "La **venta, promoción o publicidad no autorizada** de cuentas, servidores de Discord, "
+                "productos o servicios está **PROHIBIDA** dentro de Nexus Stock.\n\n"
+                f"⚠️ **Sanción aplicada:** `{action}`\n\n"
+                "🔴 No promociones cuentas, servidores ni servicios sin autorización del Staff.\n\n"
+                "**Reincidir puede resultar en sanciones más severas.**"
+            ),
+            color=config.COLOR_EMBED
+        )
+        sanction_embed.set_thumbnail(url=message.author.display_avatar.url)
+        sanction_embed.set_footer(text="NexusStore © Todos los derechos reservados")
+        sanction_embed.timestamp = discord.utils.utcnow()
+        await message.channel.send(
+            embed=sanction_embed,
+            allowed_mentions=discord.AllowedMentions(users=True)
+        )
         await send_mod_log(message.guild, message.author, action, "Promoción no autorizada")
         return True
     return False
@@ -1532,20 +1572,34 @@ async def on_member_join(member):
 
         welcome_channel = get_configured_channel(member.guild, config.WELCOME_CHANNEL_ID, config.WELCOME_CHANNEL_NAME)
         if welcome_channel:
+            rules_channel = get_configured_channel(member.guild, config.RULES_CHANNEL_ID, config.RULES_CHANNEL_NAME)
+            chat_channel = get_configured_channel(member.guild, config.CHAT_CHANNEL_ID, config.CHAT_CHANNEL_NAME)
+            vouches_channel = get_configured_channel(member.guild, config.VOUCHES_CHANNEL_ID, config.VOUCHES_CHANNEL_NAME)
+            rules_mention = rules_channel.mention if rules_channel else "#reglas"
+            chat_mention = chat_channel.mention if chat_channel else "#chat"
+            vouches_mention = vouches_channel.mention if vouches_channel else "#vouches"
             embed = discord.Embed(
-                title="🔴 NUEVO MIEMBRO",
+                title="🔴 NEXUS STOCK",
                 description=(
-                    f"Bienvenido/a {member.mention} a **NEXUS**.\n\n"
-                    "📜 Lee las reglas\n\n"
-                    "🎫 Abre un ticket si necesitas ayuda\n\n"
-                    "🛒 Mira nuestros productos\n\n"
-                    "⭐ No olvides dejar tu vouch después de una compra."
+                    f"> Bienvenido/a a **Nexus Stock**, {member.mention}.\n"
+                    "> Has entrado a nuestra comunidad oficial.\n"
+                    f"📌 Lee las reglas: {rules_mention}\n"
+                    f"🛒 Explora nuestro stock y servicios en {chat_mention}.\n"
+                    f"💬 Respeta a los demás miembros en {chat_mention}.\n\n"
+                    "⚠️ **Recuerda:** el incumplimiento de las reglas puede resultar en una sanción.\n\n"
+                    f"📖 Ve a leer las reglas en {rules_mention}.\n"
+                    f"⭐ Después de comprar, deja tu vouch en {vouches_mention}.\n\n"
+                    "**Disfruta tu estadía en Nexus Stock.**"
                 ),
                 color=config.COLOR_EMBED
             )
+            embed.set_thumbnail(url=member.display_avatar.url)
             embed.set_footer(text="NexusStore © Todos los derechos reservados")
             embed.timestamp = discord.utils.utcnow()
-            await welcome_channel.send(embed=embed)
+            await welcome_channel.send(
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(users=True)
+            )
         
         # Mensaje de invitaciones desactivado
         # try:
@@ -1565,10 +1619,16 @@ async def on_member_remove(member):
     goodbye_channel = get_configured_channel(member.guild, config.GOODBYE_CHANNEL_ID, config.GOODBYE_CHANNEL_NAME)
     if goodbye_channel:
         embed = discord.Embed(
-            title="👋 USUARIO SALIÓ",
-            description=f"{member.mention} ha abandonado el servidor.\n\nActualmente somos **{member.guild.member_count} miembros**.",
+            title="🔻 NEXUS STOCK",
+            description=(
+                f"> **{member.display_name}** ha abandonado **Nexus Stock**.\n"
+                "Gracias por haber formado parte de nuestra comunidad.\n"
+                "Esperamos volver a verte pronto.\n\n"
+                "🔴 **Nexus Stock — Underground.**"
+            ),
             color=config.COLOR_EMBED
         )
+        embed.set_thumbnail(url=member.display_avatar.url)
         embed.set_footer(text="NexusStore © Todos los derechos reservados")
         embed.timestamp = discord.utils.utcnow()
         await goodbye_channel.send(embed=embed)
@@ -1672,7 +1732,7 @@ async def panel_tickets(interaction: discord.Interaction):
     
     # Crear el embed con el color personalizado
     embed = discord.Embed(
-        title="Central de Soporte",
+        title="NEXUS - TICKETS 🔴",
         description=config.TICKET_PANEL_MESSAGE,
         color=config.COLOR_EMBED
     )
@@ -1688,6 +1748,20 @@ async def panel_tickets(interaction: discord.Interaction):
     # Enviar el mensaje al canal
     await interaction.channel.send(embed=embed, view=view)
     await interaction.response.send_message("Panel de tickets enviado correctamente", ephemeral=True)
+
+@bot.tree.command(name="publicar_reglas", description="Publica las reglas oficiales en este canal")
+@has_admin_role()
+async def publicar_reglas(interaction: discord.Interaction):
+    rules_embed = discord.Embed(
+        description=config.RULES_MESSAGE,
+        color=config.COLOR_EMBED
+    )
+    rules_embed.set_footer(text="NexusStore © Todos los derechos reservados")
+    await interaction.channel.send(
+        embed=rules_embed,
+        allowed_mentions=discord.AllowedMentions(everyone=True)
+    )
+    await interaction.response.send_message("Reglas publicadas correctamente.", ephemeral=True)
 
 @bot.command(name="embed")
 @commands.has_role(config.ADMIN_ROLE_ID)
@@ -1743,22 +1817,6 @@ async def dmall(ctx):
             logger.error(f"Error enviando DM a {member}: {e}")
             failed += 1
     await ctx.send(f"✅ Mensaje enviado a {sent} usuarios. No se pudieron enviar a {failed} usuarios (DMs desactivados).")
-
-@bot.tree.command(name="ticket", description="Abre un nuevo ticket de soporte")
-async def ticket(interaction: discord.Interaction):
-    """Abre un nuevo ticket de soporte permitiendo elegir el departamento"""
-    
-    # Crear embed
-    embed = discord.Embed(
-        title="Abrir Ticket de Soporte",
-        description="Por favor, selecciona el departamento correspondiente a tu consulta en el menú de abajo para que podamos ayudarte mejor.",
-        color=config.COLOR_EMBED
-    )
-    embed.set_footer(text="NexusStore © Todos los derechos reservados")
-    
-    view = TicketOpenView()
-    
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 @bot.tree.command(name="vouch", description="Publica un vouch con comentario y foto de la compra")
 @app_commands.describe(producto="Producto comprado", comentario="Comentario sobre la compra", imagen="Foto o captura de la compra (opcional)")
