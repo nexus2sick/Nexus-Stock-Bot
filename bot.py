@@ -2309,9 +2309,71 @@ async def dmall(ctx):
             failed += 1
     await ctx.send(f"✅ Mensaje enviado a {sent} usuarios. No se pudieron enviar a {failed} usuarios (DMs desactivados).")
 
+@bot.tree.command(name="cerrar", description="Cierra el ticket actual")
+async def cerrar_ticket(interaction: discord.Interaction):
+    """Cierra el ticket actual"""
+    # Verificar si el canal es un ticket
+    if not (interaction.channel.name.startswith(("ticket-", "🎫")) or 
+            (interaction.channel.category and interaction.channel.category.name.upper() == "TICKETS")):
+        await interaction.response.send_message("❌ Este comando solo puede usarse en canales de tickets.", ephemeral=True)
+        return
+    
+    # Verificar permisos
+    allowed_role_names = {"founder", "creator", "admin", "bots", "staff"}
+    user_role_names = {
+        re.sub(r"[^a-z0-9]", "", role.name.lower())
+        for role in interaction.user.roles
+    }
+    can_close_ticket = (
+        interaction.user.id == interaction.guild.owner_id
+        or interaction.user.guild_permissions.administrator
+        or any(
+            allowed_name in role_name
+            for role_name in user_role_names
+            for allowed_name in allowed_role_names
+        )
+    )
+    
+    if not can_close_ticket:
+        await interaction.response.send_message("❌ Solo Owner, Founder, Creator, Admin, Bots o Staff puede cerrar tickets.", ephemeral=True)
+        return
+    
+    await interaction.response.send_message("🔒 El ticket se cerrará y este canal se eliminará en 5 segundos...")
+    
+    # Embed de cierre
+    close_embed = discord.Embed(
+        title="Ticket Cerrado | Nexus Store",
+        description=(
+            f"**Este ticket ha sido cerrado por {interaction.user.mention}.**\n\n"
+            f"Gracias por contactar con el equipo de Nexus Store.\n"
+            f"Si necesitas ayuda nuevamente, no dudes en abrir un nuevo ticket.\n\n"
+            f"*Nexus Store — Manteniendo la comunidad segura y organizada.*"
+        ),
+        color=config.COLOR_EMBED
+    )
+    close_embed.set_footer(text="NexusStore © Todos los derechos reservados")
+    close_embed.timestamp = discord.utils.utcnow()
+    await interaction.channel.send(embed=close_embed)
+    await asyncio.sleep(5)
+    try:
+        await interaction.channel.delete()
+    except Exception as e:
+        await interaction.followup.send(f"Error al eliminar el canal: {e}", ephemeral=True)
+
 @bot.tree.command(name="vouch", description="Publica un vouch con comentario y foto de la compra")
-@app_commands.describe(producto="Producto comprado", comentario="Comentario sobre la compra", imagen="Foto o captura de la compra (opcional)")
-async def vouch(interaction: discord.Interaction, producto: str, comentario: str, imagen: Optional[discord.Attachment] = None):
+@app_commands.describe(
+    cliente="Cliente que compró la cuenta",
+    producto="Producto comprado", 
+    comentario="Comentario sobre la compra (ej. 10 de 10)",
+    imagen="Foto o captura de la compra (opcional)"
+)
+async def vouch(
+    interaction: discord.Interaction, 
+    cliente: discord.Member,
+    producto: str, 
+    comentario: str, 
+    imagen: Optional[discord.Attachment] = None
+):
     channel = get_configured_channel(interaction.guild, config.VOUCHES_CHANNEL_ID, config.VOUCHES_CHANNEL_NAME)
     if not channel:
         await interaction.response.send_message("No existe el canal nexus-vouches o no está configurado.", ephemeral=True)
@@ -2321,7 +2383,7 @@ async def vouch(interaction: discord.Interaction, producto: str, comentario: str
         return
     vouch_number = await get_next_vouch_number(channel)
     embed = discord.Embed(title="⭐ NUEVO VOUCH", color=config.COLOR_EMBED)
-    embed.add_field(name="👤 Cliente", value=interaction.user.mention, inline=False)
+    embed.add_field(name="👤 Cliente", value=cliente.mention, inline=False)
     embed.add_field(name="🛒 Producto", value=producto, inline=False)
     embed.add_field(name="💰 Compra", value="Completada", inline=False)
     embed.add_field(name="💬 Comentario", value=f'“{comentario}”', inline=False)
@@ -2329,9 +2391,9 @@ async def vouch(interaction: discord.Interaction, producto: str, comentario: str
         embed.set_image(url=imagen.url)
     embed.set_footer(text=f"NEXUS • Vouch #{vouch_number}")
     embed.timestamp = discord.utils.utcnow()
-    await channel.send(content=f"✅ +1 VOUCH {interaction.user.mention}", embed=embed)
+    await channel.send(content=f"✅ +1 VOUCH {cliente.mention}", embed=embed)
     if "$" in producto or "$" in comentario:
-        await register_purchase(interaction.guild, interaction.user)
+        await register_purchase(interaction.guild, cliente)
     await interaction.response.send_message("✅ Tu vouch fue publicado.", ephemeral=True)
 
 @bot.tree.command(name="top_compradores", description="Muestra el top de compradores de Nexus Stock")
