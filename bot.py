@@ -1991,20 +1991,39 @@ async def on_member_join(member):
         # Pequeña espera para asegurar que Discord procese el evento
         await asyncio.sleep(0.5)
         
+        # Intentar múltiples variaciones del nombre del rol
+        role_variations = [
+            config.AUTO_ROLE_NAME,
+            "MIEMBROS", 
+            "MIEMBRO", 
+            "MEMBER", 
+            "MEMBERS",
+            "Miembros",
+            "Miembro"
+        ]
+        
         role = member.guild.get_role(config.AUTO_ROLE_ID) if config.AUTO_ROLE_ID is not None else None
+        
         if role is None:
-            role = discord.utils.find(
-                lambda candidate: candidate.name.strip().casefold() == config.AUTO_ROLE_NAME.casefold(),
-                member.guild.roles
-            )
+            # Buscar rol por nombre con múltiples variaciones
+            for variation in role_variations:
+                role = discord.utils.find(
+                    lambda candidate: candidate.name.strip().casefold() == variation.casefold(),
+                    member.guild.roles
+                )
+                if role:
+                    logger.info(f"Rol encontrado con variación: {variation} -> {role.name}")
+                    break
+        
         if role:
             try:
                 await member.add_roles(role, reason="Rol automático al entrar al servidor")
+                logger.info(f"Rol '{role.name}' asignado a {member.name} al unirse")
             except discord.Forbidden:
-                logger.warning(f"No tengo permisos para asignar el rol {role.name} a {member}")
+                logger.error(f"No tengo permisos para asignar el rol {role.name} a {member}. Verifica que el bot tenga el permiso 'Manage Roles'.")
         else:
-            logger.warning(
-                f"No se encontró el rol automático '{config.AUTO_ROLE_NAME}' en {member.guild.name}"
+            logger.error(
+                f"No se encontró ningún rol automático en {member.guild.name}. Buscando: {role_variations}. Roles disponibles: {[r.name for r in member.guild.roles[:10]]}"
             )
 
         welcome_channel = get_configured_channel(member.guild, config.WELCOME_CHANNEL_ID, config.WELCOME_CHANNEL_NAME)
@@ -2455,18 +2474,11 @@ async def vouch(
     comentario: str, 
     imagen: Optional[discord.Attachment] = None
 ):
-    # Determinar el canal de vouches según el vendedor seleccionado
-    seller_name = vendedor.value
-    channel_config = config.VOUCHES_CHANNELS.get(seller_name)
-    
-    if not channel_config:
-        await interaction.response.send_message("Vendedor no configurado correctamente.", ephemeral=True)
-        return
-    
-    channel = get_configured_channel(interaction.guild, channel_config["id"], channel_config["name"])
+    # Siempre publicar en el canal de Nexus (canal principal del usuario)
+    channel = get_configured_channel(interaction.guild, config.VOUCHES_CHANNEL_ID, config.VOUCHES_CHANNEL_NAME)
     
     if not channel:
-        await interaction.response.send_message(f"No existe el canal de vouches para {seller_name}.", ephemeral=True)
+        await interaction.response.send_message("No existe el canal de vouches principal configurado.", ephemeral=True)
         return
     if imagen and (not imagen.content_type or not imagen.content_type.startswith("image/")):
         await interaction.response.send_message("La evidencia debe ser una imagen.", ephemeral=True)
@@ -2482,7 +2494,37 @@ async def vouch(
         embed.set_image(url=imagen.url)
     embed.set_footer(text=f"NEXUS • Vouch #{vouch_number}")
     embed.timestamp = discord.utils.utcnow()
-    await channel.send(content=f"✅ +1 VOUCH {interaction.guild.owner.mention}", embed=embed)
+    
+    # Determinar la mención correcta según el vendedor
+    seller_name = vendedor.value
+    seller_mention = interaction.guild.owner.mention  # Por defecto owner (Nexus)
+    
+    if seller_name == "mayer":
+        # Buscar usuario Mayer por rol o nombre
+        mayer_role = discord.utils.get(interaction.guild.roles, name="Mayer")
+        if mayer_role:
+            mayer_member = discord.utils.find(lambda m: mayer_role in m.roles, interaction.guild.members)
+            seller_mention = mayer_member.mention if mayer_member else "@Mayer"
+        else:
+            seller_mention = "@Mayer"
+    elif seller_name == "noxy":
+        # Buscar usuario Noxy por rol o nombre
+        noxy_role = discord.utils.get(interaction.guild.roles, name="Noxy")
+        if noxy_role:
+            noxy_member = discord.utils.find(lambda m: noxy_role in m.roles, interaction.guild.members)
+            seller_mention = noxy_member.mention if noxy_member else "@Noxy"
+        else:
+            seller_mention = "@Noxy"
+    elif seller_name == "magin":
+        # Buscar usuario Magin por rol o nombre
+        magin_role = discord.utils.get(interaction.guild.roles, name="Magin")
+        if magin_role:
+            magin_member = discord.utils.find(lambda m: magin_role in m.roles, interaction.guild.members)
+            seller_mention = magin_member.mention if magin_member else "@Magin"
+        else:
+            seller_mention = "@Magin"
+    
+    await channel.send(content=f"✅ +1 VOUCH {seller_mention}", embed=embed)
     if "$" in producto or "$" in comentario:
         await register_purchase(interaction.guild, cliente, seller=vendedor.name)
     await interaction.response.send_message("✅ Tu vouch fue publicado.", ephemeral=True)
