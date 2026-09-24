@@ -35,6 +35,13 @@ MOD_LOG_CHANNEL_NAME = "chat-admins"
 VOUCHES_CHANNEL_ID = 1509359333538791459
 VOUCHES_CHANNEL_NAME = "✅・nexus-vouches"
 
+# Configuración de múltiples canales de vouches para diferentes vendedores
+VOUCHES_CHANNELS = {
+    "nexus": {"id": 1509359333538791459, "name": "✅・nexus-vouches"},
+    "mayer": {"id": None, "name": "✅・mayer-vouches"},
+    "noxy": {"id": None, "name": "✅・noxy-vouches"}
+}
+
 # Restricción de comandos por canal
 COMMANDS_RESTRICTION_ENABLED = True
 COMMANDS_CHANNEL_ID = None

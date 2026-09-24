@@ -24,6 +24,33 @@ def has_admin_role():
         return interaction.guild is not None and interaction.user.id == interaction.guild.owner_id
     return app_commands.check(predicate)
 
+def has_voucher_permission():
+    """Permite comandos de vouch a administradores, fundadores y owners."""
+    async def predicate(interaction: discord.Interaction):
+        if interaction.guild is None:
+            return False
+        
+        # Owner siempre tiene permiso
+        if interaction.user.id == interaction.guild.owner_id:
+            return True
+        
+        # Buscar roles permitidos
+        allowed_role_names = {"vendedor", "vendedores", "administrador", "administradores", "admin", "admins", "fundador", "fundadores", "founder", "creador", "creator"}
+        user_role_names = {
+            re.sub(r"[^a-z0-9]", "", role.name.lower())
+            for role in interaction.user.roles
+        }
+        
+        # Verificar si tiene algún rol permitido
+        has_permission = any(
+            allowed_name in role_name
+            for role_name in user_role_names
+            for allowed_name in allowed_role_names
+        )
+        
+        return has_permission
+    return app_commands.check(predicate)
+
 # Configurar logging limpio y silencioso para errores de voz
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -1550,6 +1577,30 @@ async def on_message(message):
                 pass
             return
 
+    # Sistema de vouches automáticos para Mayer y Noxy (solo detectar $)
+    if message.guild and config.REPUTATION_ENABLED:
+        # Verificar si el mensaje está en canales de vouches de amigos (excluir nexus)
+        is_friend_vouch_channel = False
+        for seller_name, channel_config in config.VOUCHES_CHANNELS.items():
+            if seller_name == "nexus":
+                continue  # Saltar canal de nexus (owner usa comando manual)
+            vouch_channel = get_configured_channel(message.guild, channel_config["id"], channel_config["name"])
+            if vouch_channel and message.channel.id == vouch_channel.id:
+                is_friend_vouch_channel = True
+                break
+        
+        if is_friend_vouch_channel and "$" in message.content:
+            # Extraer el cliente mencionado en el vouch
+            mentioned_users = message.mentions
+            if mentioned_users:
+                client = mentioned_users[0]  # Usar el primer usuario mencionado como cliente
+                await register_purchase(message.guild, client)
+                logger.info(f"Vouch con $ detectado en canal de {seller_name}, compra registrada para {client.name} (ID: {client.id})")
+            else:
+                # Si no hay menciones, intentar registrar al autor del mensaje como cliente
+                await register_purchase(message.guild, message.author)
+                logger.info(f"Vouch con $ detectado sin mención en canal de {seller_name}, compra registrada para autor {message.author.name} (ID: {message.author.id})")
+
     try:
         await maybe_send_faq(message)
     except Exception as e:
@@ -2360,23 +2411,42 @@ async def cerrar_ticket(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(f"Error al eliminar el canal: {e}", ephemeral=True)
 
-@bot.tree.command(name="vouch", description="Publica un vouch con comentario y foto de la compra")
+@bot.tree.command(name="vouch", description="Publica un vouch con cliente, vendedor, comentario y foto de la compra")
+@has_voucher_permission()
 @app_commands.describe(
     cliente="Cliente que compró la cuenta",
+    vendedor="Vendedor de la cuenta (tú, Mayer o Noxy)",
     producto="Producto comprado", 
     comentario="Comentario sobre la compra (ej. 10 de 10)",
     imagen="Foto o captura de la compra (opcional)"
 )
+@app_commands.choices(
+    vendedor=[
+        app_commands.Choice(name="Nexus", value="nexus"),
+        app_commands.Choice(name="Mayer", value="mayer"),
+        app_commands.Choice(name="Noxy", value="noxy")
+    ]
+)
 async def vouch(
     interaction: discord.Interaction, 
     cliente: discord.Member,
+    vendedor: app_commands.Choice[str],
     producto: str, 
     comentario: str, 
     imagen: Optional[discord.Attachment] = None
 ):
-    channel = get_configured_channel(interaction.guild, config.VOUCHES_CHANNEL_ID, config.VOUCHES_CHANNEL_NAME)
+    # Determinar el canal de vouches según el vendedor seleccionado
+    seller_name = vendedor.value
+    channel_config = config.VOUCHES_CHANNELS.get(seller_name)
+    
+    if not channel_config:
+        await interaction.response.send_message("Vendedor no configurado correctamente.", ephemeral=True)
+        return
+    
+    channel = get_configured_channel(interaction.guild, channel_config["id"], channel_config["name"])
+    
     if not channel:
-        await interaction.response.send_message("No existe el canal nexus-vouches o no está configurado.", ephemeral=True)
+        await interaction.response.send_message(f"No existe el canal de vouches para {seller_name}.", ephemeral=True)
         return
     if imagen and (not imagen.content_type or not imagen.content_type.startswith("image/")):
         await interaction.response.send_message("La evidencia debe ser una imagen.", ephemeral=True)
@@ -2384,6 +2454,7 @@ async def vouch(
     vouch_number = await get_next_vouch_number(channel)
     embed = discord.Embed(title="⭐ NUEVO VOUCH", color=config.COLOR_EMBED)
     embed.add_field(name="👤 Cliente", value=cliente.mention, inline=False)
+    embed.add_field(name="🏪 Vendedor", value=vendedor.name, inline=False)
     embed.add_field(name="🛒 Producto", value=producto, inline=False)
     embed.add_field(name="💰 Compra", value="Completada", inline=False)
     embed.add_field(name="💬 Comentario", value=f'“{comentario}”', inline=False)
@@ -2391,7 +2462,7 @@ async def vouch(
         embed.set_image(url=imagen.url)
     embed.set_footer(text=f"NEXUS • Vouch #{vouch_number}")
     embed.timestamp = discord.utils.utcnow()
-    await channel.send(content=f"✅ +1 VOUCH {cliente.mention}", embed=embed)
+    await channel.send(content=f"✅ +1 VOUCH {interaction.guild.owner.mention}", embed=embed)
     if "$" in producto or "$" in comentario:
         await register_purchase(interaction.guild, cliente)
     await interaction.response.send_message("✅ Tu vouch fue publicado.", ephemeral=True)
