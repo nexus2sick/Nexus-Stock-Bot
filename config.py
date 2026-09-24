@@ -63,7 +63,7 @@ FAQ_COOLDOWN_SECONDS = 30
 FAQ_TOPICS = [
 	{
 		"key": "drops",
-		"keywords": ["drop", "drops"],
+		"keywords": ["drop", "drops", "dropeo", "el drop", "los drops", "funcionan los drops", "eso de los drops", "reclamar drop", "reclamar un drop"],
 		"message": """🎁 **¿Cómo funcionan los Drops?**
 
 Los **Drops** son recompensas que se publican en el servidor de **Nexus Stock**.
@@ -80,7 +80,7 @@ Los **Drops** son recompensas que se publican en el servidor de **Nexus Stock**.
 	},
 	{
 		"key": "pago",
-		"keywords": ["como pago", "cómo pago", "como se paga", "cómo se paga", "metodo de pago", "método de pago", "metodos de pago", "métodos de pago", "formas de pago", "donde pago", "dónde pago"],
+		"keywords": ["como pago", "cómo pago", "como se paga", "cómo se paga", "como pagar", "cómo pagar", "metodo de pago", "método de pago", "metodos de pago", "métodos de pago", "formas de pago", "donde pago", "dónde pago", "payments", "pagar"],
 		"message": """💳 **¿CÓMO PAGO?**
 
 Para realizar un pago, abre un **ticket de compra** y nuestro equipo te indicará los métodos de pago disponibles y los pasos a seguir. Los métodos de pago están en el canal #payments.
@@ -91,7 +91,7 @@ Una vez realizado el pago, envía captura de que se realizó el pago dentro del 
 	},
 	{
 		"key": "garantia",
-		"keywords": ["garantia", "garantía", "hay garantia", "hay garantía", "tiene garantia", "tiene garantía"],
+		"keywords": ["garantia", "garantía", "garantias", "garantías", "hay garantia", "hay garantía", "tiene garantia", "tiene garantía", "la garantia", "la garantía"],
 		"message": """🛡️ **¿HAY GARANTÍA?**
 
 Nexus no ofrece garantía en las cuentas a menos que se indique específicamente en la descripción del producto.
@@ -118,7 +118,7 @@ Esto puede incluir:
 	},
 	{
 		"key": "origen_cuentas",
-		"keywords": ["de donde sacan las cuentas", "de dónde sacan las cuentas", "de donde sacan cuentas", "como consiguen las cuentas", "cómo consiguen las cuentas", "donde consiguen las cuentas", "dónde consiguen las cuentas"],
+		"keywords": ["de donde sacan las cuentas", "de dónde sacan las cuentas", "de donde sacan cuentas", "de donde las sacan", "como consiguen las cuentas", "cómo consiguen las cuentas", "donde consiguen las cuentas", "dónde consiguen las cuentas", "de donde sacan"],
 		"message": """🔒 **¿DE DÓNDE SACAN LAS CUENTAS?**
 
 Esa información es **privada** y no podemos revelar detalles sobre nuestros métodos de obtención.

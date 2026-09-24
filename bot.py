@@ -1338,13 +1338,58 @@ def get_configured_channel(guild, channel_id, channel_name):
     channel = discord.utils.get(guild.text_channels, name=channel_name)
     if channel:
         return channel
-    import re
     normalized_name = re.sub(r"[^a-z0-9]", "", channel_name.lower())
+    exact = None
+    partial = None
     for candidate in guild.text_channels:
         normalized_candidate = re.sub(r"[^a-z0-9]", "", candidate.name.lower())
-        if normalized_name in normalized_candidate:
-            return candidate
-    return None
+        if normalized_name == normalized_candidate:
+            exact = candidate
+            break
+        if len(normalized_name) >= 6 and normalized_name in normalized_candidate and partial is None:
+            partial = candidate
+    return exact or partial
+
+def _faq_normalize(text: str) -> str:
+    text = (text or "").casefold()
+    for src, dst in (("á", "a"), ("é", "e"), ("í", "i"), ("ó", "o"), ("ú", "u"), ("ü", "u"), ("ñ", "n")):
+        text = text.replace(src, dst)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+def _faq_keyword_matches(content: str, keyword: str) -> bool:
+    haystack = _faq_normalize(content)
+    needle = _faq_normalize(keyword)
+    if not haystack or not needle:
+        return False
+    if " " in needle:
+        return needle in haystack
+    return bool(re.search(rf"(^|\s){re.escape(needle)}s?(\s|$)", haystack))
+
+async def maybe_send_faq(message) -> bool:
+    if not config.FAQ_ENABLED or not message.guild:
+        return False
+    content = message.content or message.clean_content or ""
+    if not content.strip():
+        return False
+    for topic in config.FAQ_TOPICS:
+        if not any(_faq_keyword_matches(content, keyword) for keyword in topic["keywords"]):
+            continue
+        cooldown_key = (message.channel.id, topic["key"])
+        now = discord.utils.utcnow().timestamp()
+        last_sent = bot.faq_cooldown.get(cooldown_key, 0)
+        if now - last_sent < config.FAQ_COOLDOWN_SECONDS:
+            return True
+        bot.faq_cooldown[cooldown_key] = now
+        faq_embed = discord.Embed(
+            description=topic["message"],
+            color=config.COLOR_EMBED
+        )
+        faq_embed.set_footer(text="Nexus AI Help • NexusStore © Todos los derechos reservados")
+        await message.channel.send(embed=faq_embed)
+        logger.info(f"FAQ '{topic['key']}' enviado en #{getattr(message.channel, 'name', message.channel.id)}")
+        return True
+    return False
 
 async def ticket_inactivity_loop():
     await bot.wait_until_ready()
@@ -1505,32 +1550,10 @@ async def on_message(message):
                 pass
             return
 
-    if config.FAQ_ENABLED and message.guild:
-        content_lower = message.content.lower()
-        for topic in config.FAQ_TOPICS:
-            matched = False
-            for keyword in topic["keywords"]:
-                if " " in keyword:
-                    matched = keyword in content_lower
-                else:
-                    matched = bool(re.search(rf"\b{re.escape(keyword)}\b", content_lower))
-                if matched:
-                    break
-            if not matched:
-                continue
-
-            cooldown_key = (message.channel.id, topic["key"])
-            now = discord.utils.utcnow().timestamp()
-            last_sent = bot.faq_cooldown.get(cooldown_key, 0)
-            if now - last_sent >= config.FAQ_COOLDOWN_SECONDS:
-                bot.faq_cooldown[cooldown_key] = now
-                faq_embed = discord.Embed(
-                    description=topic["message"],
-                    color=config.COLOR_EMBED
-                )
-                faq_embed.set_footer(text="Nexus AI Help • NexusStore © Todos los derechos reservados")
-                await message.channel.send(embed=faq_embed)
-            break
+    try:
+        await maybe_send_faq(message)
+    except Exception as e:
+        logger.error(f"Error enviando FAQ automático: {e}")
 
     if message.guild and message.guild.owner_id in message.raw_mentions and message.author.id != message.guild.owner_id:
         mention_key = (message.guild.id, message.author.id)
