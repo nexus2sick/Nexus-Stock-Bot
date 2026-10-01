@@ -46,6 +46,11 @@ VOUCHES_SELLER_IDS = {
 	"mayer": None,
 	"noxy": None
 }
+VOUCH_COUNTER_STARTS = {
+	"nexus": 190,
+	"mayer": 0,
+	"noxy": 21
+}
 
 # Restricción de comandos por canal
 COMMANDS_RESTRICTION_ENABLED = True
@@ -171,11 +176,27 @@ PROHIBITED_WORDS = [
 	"pajuato",
 	"patin"
 ]  # Agrega aqui las palabras que quieras bloquear
-PROMOTION_WORDS = ["discord.gg/", "discord.com/invite/", "compra", "vendo", "venta"]
+PROMOTION_INVITE_PATTERNS = ["discord.gg/", "discord.com/invite/", ".gg/"]
+PROMOTION_DIRECT_PHRASES = ["entra a mi server", "entra a mi servidor", "join my server"]
+PROMOTION_ACTION_TERMS = ["vendo", "vendemos", "venta", "ventas", "en venta", "a la venta", "promocion", "promoción", "promocionando", "publicidad", "anuncio", "anunciar", "oferta", "ofertas", "descuento", "rebaja", "barato", "baratos", "únete", "unete", "join", "invite", "invitacion", "invitación", "instagram", "tiktok", "youtube", "twitter", "telegram", "whatsapp", "snapchat", "sígueme", "sigueme", "follow me", "follow"]
+PROMOTION_LINK_CONTEXT_TERMS = ["vendo", "vendemos", "venta", "ventas", "en venta", "a la venta", "compra aqui", "compra aquí", "oferta", "ofertas", "barato", "baratos", "promocion", "promoción", "promocionando", "publicidad", "anuncio", "anunciar", "descuento", "rebaja", "precio", "precios", "stock", "nuevo stock", "disponible", "sigueme", "sígueme", "follow", "follow me"]
+PROMOTION_DISCORD_CONTEXT_TERMS = ["vendo", "vendemos", "venta", "ventas", "en venta", "a la venta", "promocion", "promoción", "promocionando", "publicidad", "anuncio", "anunciar", "oferta", "ofertas", "descuento", "rebaja", "barato", "baratos", "únete", "unete", "unanse", "join", "entra a mi server", "entra a mi servidor", "join my server", "invite", "invitacion", "invitación", "instagram", "tiktok", "youtube", "twitter", "telegram", "whatsapp", "snapchat", "sígueme", "sigueme", "follow me", "follow"]
+PROMOTION_DM_CONTEXT_TERMS = ["comprar", "compren", "compra"]
 BAD_WORD_TIMEOUT_MINUTES = 10
 PROMOTION_FIRST_TIMEOUT_MINUTES = 5
 PROMOTION_SECOND_TIMEOUT_MINUTES = 10
-PROMOTION_WARNINGS_BEFORE_BAN = 3
+PROMOTION_WARNINGS_BEFORE_BAN = 4
+
+# Conteo inicial de compradores; se resuelven a IDs reales del servidor al iniciar/consultar el top.
+INITIAL_PURCHASE_COUNTS = {
+	"fabian055502": 2,
+	"psfivee": 1,
+	"sudllix": 1,
+	"joedieldelgado": 1,
+	"clownnbot": 1,
+	"ianx26pro104": 1,
+	"keniii12334": 1
+}
 
 # Tickets: aviso a las 15 horas y cierre a las 20 horas sin actividad
 TICKET_INACTIVITY_ENABLED = True

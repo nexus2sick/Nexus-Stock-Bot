@@ -225,11 +225,20 @@ GIVEAWAYS_FILE = "giveaways.json"
 async def get_next_vouch_number(channel) -> int:
     """Guarda el contador de vouches en el topic del canal para que sobreviva a reinicios de Render."""
     import re
-    current = 177
+    channel_key = None
+    normalized_channel_name = re.sub(r"[^a-z0-9]", "", channel.name.casefold())
+    for seller_key, channel_config in config.VOUCHES_CHANNELS.items():
+        configured_id = channel_config.get("id")
+        configured_name = re.sub(r"[^a-z0-9]", "", channel_config["name"].casefold())
+        if (configured_id and channel.id == configured_id) or normalized_channel_name == configured_name:
+            channel_key = seller_key
+            break
+
+    current = config.VOUCH_COUNTER_STARTS.get(channel_key, 0)
     if channel.topic:
         match = re.search(r'VOUCH_COUNT:(\d+)', channel.topic)
         if match:
-            current = int(match.group(1))
+            current = max(current, int(match.group(1)))
     new_count = current + 1
     tag = f"VOUCH_COUNT:{new_count}"
     if channel.topic and re.search(r'VOUCH_COUNT:\d+', channel.topic):
@@ -300,6 +309,48 @@ def save_reputation(data):
     except Exception as e:
         logger.error(f"Error guardando reputación: {e}")
 
+async def seed_initial_purchase_counts(guild, reputation=None):
+    reputation = dict(reputation if reputation is not None else load_reputation())
+    if reputation.get("_initial_purchase_seed_version") == 1:
+        return reputation
+
+    members = list(guild.members)
+    normalized_members = {
+        re.sub(r"[^a-z0-9]", "", name.casefold()): member
+        for member in members
+        for name in {member.name, member.display_name, getattr(member, "global_name", None) or ""}
+        if name
+    }
+    resolved = {}
+    for username, count in config.INITIAL_PURCHASE_COUNTS.items():
+        normalized_username = re.sub(r"[^a-z0-9]", "", username.casefold())
+        member = normalized_members.get(normalized_username)
+        if member:
+            resolved[str(member.id)] = count
+
+    if len(resolved) != len(config.INITIAL_PURCHASE_COUNTS):
+        try:
+            async for member in guild.fetch_members(limit=None):
+                names = {member.name, member.display_name, getattr(member, "global_name", None) or ""}
+                for username, count in config.INITIAL_PURCHASE_COUNTS.items():
+                    normalized_username = re.sub(r"[^a-z0-9]", "", username.casefold())
+                    if any(re.sub(r"[^a-z0-9]", "", name.casefold()) == normalized_username for name in names if name):
+                        resolved[str(member.id)] = count
+        except (discord.Forbidden, discord.HTTPException) as e:
+            logger.warning(f"No pude buscar todos los miembros para inicializar el Top: {e}")
+
+    if len(resolved) != len(config.INITIAL_PURCHASE_COUNTS):
+        missing = set(config.INITIAL_PURCHASE_COUNTS) - {
+            username for username in config.INITIAL_PURCHASE_COUNTS
+            if re.sub(r"[^a-z0-9]", "", username.casefold()) in normalized_members
+        }
+        logger.warning(f"No se resolvieron todos los usuarios iniciales del Top: {', '.join(sorted(missing))}")
+        return reputation
+
+    reputation = {"_initial_purchase_seed_version": 1, **resolved}
+    save_reputation(reputation)
+    return reputation
+
 async def apply_purchase_rank(guild, member, total: int):
     """Asigna el rol de rango más alto alcanzado según el total de compras."""
     tiers = sorted(config.PURCHASE_RANK_ROLES.items())
@@ -326,7 +377,8 @@ async def apply_purchase_rank(guild, member, total: int):
         logger.warning(f"No tengo permisos para asignar rangos por compras a {member}")
 
 def _top_purchasers(reputation: dict, limit: int):
-    return sorted(reputation.items(), key=lambda item: item[1], reverse=True)[:limit]
+    buyer_counts = ((uid, count) for uid, count in reputation.items() if uid.isdigit())
+    return sorted(buyer_counts, key=lambda item: item[1], reverse=True)[:limit]
 
 async def maybe_announce_leaderboard(guild, channel, reputation_before: dict, reputation_after: dict):
     if not config.LEADERBOARD_ENABLED:
@@ -356,14 +408,16 @@ async def maybe_announce_leaderboard(guild, channel, reputation_before: dict, re
     await channel.send(embed=embed)
 
 async def register_purchase(guild, user, amount: int = 1, seller: str = "Nexus", credited_member=None):
-    """Registra una venta y acredita el total al vendedor indicado."""
+    """Registra las compras del cliente y las ventas del vendedor por separado."""
     if not config.REPUTATION_ENABLED:
         return
     credited_member = credited_member or user
-    reputation_before = load_reputation()
+    reputation_before = await seed_initial_purchase_counts(guild)
     reputation = dict(reputation_before)
-    key = str(credited_member.id)
-    reputation[key] = reputation.get(key, 0) + amount
+    buyer_key = str(user.id)
+    seller_key = f"seller:{credited_member.id}"
+    reputation[buyer_key] = reputation.get(buyer_key, 0) + amount
+    reputation[seller_key] = reputation.get(seller_key, 0) + amount
     save_reputation(reputation)
 
     channel = get_configured_channel(guild, config.REPUTATION_CHANNEL_ID, config.REPUTATION_CHANNEL_NAME)
@@ -371,25 +425,26 @@ async def register_purchase(guild, user, amount: int = 1, seller: str = "Nexus",
         logger.warning(f"No se encontró el canal de reputación en {guild.name}")
         return
 
-    total = reputation[key]
+    buyer_total = reputation[buyer_key]
+    seller_total = reputation[seller_key]
     embed = discord.Embed(
         title="🛒 COMPRA REGISTRADA",
         description=(
-            "> 🔴 **NEXUS STOCK — REPUTACIÓN**\n\n"
             f"🛒 **{user.mention}** compró una cuenta a **{credited_member.mention}**.\n\n"
-            f"📦 **Ventas registradas:** `{total}`\n\n"
+            f"📦 **Cuentas compradas por el cliente:** `{buyer_total}`\n"
+            f"🏪 **Ventas registradas del vendedor:** `{seller_total}`\n\n"
             "⭐ Gracias por confiar en **Nexus Stock**.\n"
             "La venta ha sido registrada correctamente en nuestro sistema.\n\n"
             "🔴 **Nexus Stock • Trusted Stock**"
         ),
         color=config.COLOR_EMBED
     )
-    embed.set_thumbnail(url=credited_member.display_avatar.url)
+    embed.set_thumbnail(url=user.display_avatar.url)
     embed.timestamp = discord.utils.utcnow()
     await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions(users=True))
 
-    if isinstance(credited_member, discord.Member):
-        await apply_purchase_rank(guild, credited_member, total)
+    if isinstance(user, discord.Member):
+        await apply_purchase_rank(guild, user, buyer_total)
 
     await maybe_announce_leaderboard(guild, channel, reputation_before, reputation)
 
@@ -1450,6 +1505,23 @@ async def send_mod_log(guild, user, action, reason):
     embed.add_field(name="🕐 Hora", value=discord.utils.format_dt(discord.utils.utcnow(), "t"), inline=True)
     await channel.send(embed=embed)
 
+def is_unauthorized_promotion(content: str) -> bool:
+    content = content.casefold()
+    has_link = bool(re.search(r"(?:https?://|www\.)\S+", content))
+    if any(pattern in content for pattern in config.PROMOTION_INVITE_PATTERNS):
+        return True
+
+    if any(phrase in content for phrase in config.PROMOTION_DIRECT_PHRASES):
+        return True
+
+    has_discord = "discord" in content or "servidor" in content or "server" in content
+    has_dm = bool(re.search(r"\bdm\b|mensaje directo|por privado", content))
+    link_context = any(term in content for term in config.PROMOTION_LINK_CONTEXT_TERMS)
+    discord_context = any(term in content for term in config.PROMOTION_DISCORD_CONTEXT_TERMS)
+    dm_context = any(term in content for term in config.PROMOTION_DM_CONTEXT_TERMS)
+
+    return (has_link and link_context) or (has_discord and discord_context) or (has_dm and dm_context)
+
 async def moderate_message(message):
     if not config.MODERATION_ENABLED or not message.guild:
         return False
@@ -1457,7 +1529,7 @@ async def moderate_message(message):
         return False
     content = message.content.lower()
     matched_bad_word = next((word for word in config.PROHIBITED_WORDS if word.lower() in content), None)
-    matched_promotion = next((word for word in config.PROMOTION_WORDS if word.lower() in content), None)
+    matched_promotion = is_unauthorized_promotion(content)
     if matched_bad_word:
         try:
             await message.delete()
@@ -1497,32 +1569,36 @@ async def moderate_message(message):
         bot.moderation_warnings[key] = warnings
         if warnings >= config.PROMOTION_WARNINGS_BEFORE_BAN:
             try:
-                await message.author.ban(reason="Promoción no autorizada: tercera sanción")
+                await message.author.ban(reason="Promoción no autorizada: cuarta infracción")
                 action = "BAN PERMANENTE"
             except discord.Forbidden:
                 action = "BAN FALLIDO (sin permiso para banear)"
+        elif warnings == 1:
+            action = "ADVERTENCIA"
         else:
-            timeout_minutes = (
-                config.PROMOTION_FIRST_TIMEOUT_MINUTES
-                if warnings == 1
-                else config.PROMOTION_SECOND_TIMEOUT_MINUTES
-            )
+            timeout_minutes = config.PROMOTION_FIRST_TIMEOUT_MINUTES if warnings == 2 else config.PROMOTION_SECOND_TIMEOUT_MINUTES
             try:
                 await message.author.timeout(
                     timedelta(minutes=timeout_minutes),
-                    reason=f"Promoción no autorizada: sanción {warnings}/3"
+                    reason=f"Promoción no autorizada: infracción {warnings}/4"
                 )
                 action = f"TIMEOUT {timeout_minutes} MIN"
             except discord.Forbidden:
                 action = f"TIMEOUT FALLIDO {timeout_minutes} MIN (sin permiso)"
 
+        action_notice = (
+            "⚠️ **Advertencia — Promoción no permitida.**"
+            if warnings == 1
+            else f"⚠️ **Sanción aplicada:** `{action}`"
+        )
         sanction_embed = discord.Embed(
-            title="🚫 NEXUS STOCK — SANCIÓN",
+            title="⚠️ NEXUS STOCK — ADVERTENCIA" if warnings == 1 else "🚫 NEXUS STOCK — SANCIÓN",
             description=(
                 f"> **{message.author.mention}**, tu mensaje ha sido eliminado automáticamente.\n"
                 "La **venta, promoción o publicidad no autorizada** de cuentas, servidores de Discord, "
                 "productos o servicios está **PROHIBIDA** dentro de Nexus Stock.\n\n"
-                f"⚠️ **Sanción aplicada:** `{action}`\n\n"
+                f"{action_notice}\n\n"
+                "Primera infracción: advertencia; segunda: 5 minutos; tercera: 10 minutos; cuarta: baneo permanente.\n\n"
                 "🔴 No promociones cuentas, servidores ni servicios sin autorización del Staff.\n\n"
                 "**Reincidir puede resultar en sanciones más severas.**"
             ),
@@ -2335,6 +2411,44 @@ async def timeout_cmd(
         ephemeral=True
     )
 
+@bot.tree.command(name="ATH", description="Muestra la información oficial de pago por ATH Móvil")
+async def ath_pago(interaction: discord.Interaction):
+    allowed_role_names = {"admin", "admins", "administrador", "administradores", "staff", "founder", "founders", "fundador", "fundadores", "creator", "creators", "creador", "creadores"}
+    normalized_roles = {
+        re.sub(r"[^a-z0-9]", "", role.name.casefold())
+        for role in getattr(interaction.user, "roles", [])
+    }
+    is_allowed = (
+        interaction.guild is not None
+        and (
+            interaction.user.id == interaction.guild.owner_id
+            or interaction.user.guild_permissions.administrator
+            or interaction.user.guild_permissions.manage_guild
+            or any(allowed in role_name for role_name in normalized_roles for allowed in allowed_role_names)
+        )
+    )
+    if not is_allowed:
+        await interaction.response.send_message("❌ Este comando es solo para Admins y Staff.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="💙 ATH MÓVIL",
+        description=(
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📱 **NÚMERO DE TELÉFONO**\n"
+            "`787-519-7893`\n\n"
+            "👤 **NOMBRE DE ATH MÓVIL**\n"
+            "`Eriel`\n\n"
+            "⚠️ **NOTA IMPORTANTE**\n"
+            "Al realizar el pago, **envía únicamente el dinero**.\n"
+            "❌ **NO escribas ninguna nota, mensaje o comentario** junto al pago.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "💙 **NEXUS PAYMENTS**"
+        ),
+        color=0x3498DB
+    )
+    await interaction.response.send_message(embed=embed)
+
 @bot.command(name="embed")
 @commands.has_role(config.ADMIN_ROLE_ID)
 async def embed_cmd(ctx, titulo: str, *, resto: str):
@@ -2516,7 +2630,7 @@ async def vouch(
 
 @bot.tree.command(name="top_compradores", description="Muestra el top de compradores de Nexus Stock")
 async def top_compradores(interaction: discord.Interaction):
-    reputation = load_reputation()
+    reputation = await seed_initial_purchase_counts(interaction.guild)
     top = _top_purchasers(reputation, config.LEADERBOARD_SIZE)
     if not top:
         await interaction.response.send_message("Todavía no hay compras registradas.", ephemeral=True)
