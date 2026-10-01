@@ -355,13 +355,14 @@ async def maybe_announce_leaderboard(guild, channel, reputation_before: dict, re
     embed.timestamp = discord.utils.utcnow()
     await channel.send(embed=embed)
 
-async def register_purchase(guild, user, amount: int = 1, seller: str = "Nexus"):
-    """Suma compras al historial de reputación y anuncia el total en el canal correspondiente."""
+async def register_purchase(guild, user, amount: int = 1, seller: str = "Nexus", credited_member=None):
+    """Registra una venta y acredita el total al vendedor indicado."""
     if not config.REPUTATION_ENABLED:
         return
+    credited_member = credited_member or user
     reputation_before = load_reputation()
     reputation = dict(reputation_before)
-    key = str(user.id)
+    key = str(credited_member.id)
     reputation[key] = reputation.get(key, 0) + amount
     save_reputation(reputation)
 
@@ -370,45 +371,25 @@ async def register_purchase(guild, user, amount: int = 1, seller: str = "Nexus")
         logger.warning(f"No se encontró el canal de reputación en {guild.name}")
         return
 
-    # Calcular total general de compras en el servidor
-    total_server_purchases = sum(reputation.values())
-    
-    # Obtener mención del vendedor
-    seller_mention = seller
-    if seller.lower() == "nexus":
-        seller_mention = guild.owner.mention
-    elif seller.lower() == "mayer":
-        # Buscar usuario con rol de Mayer o similar
-        mayer_role = discord.utils.get(guild.roles, name="Mayer")
-        if mayer_role:
-            mayer_member = discord.utils.find(lambda m: mayer_role in m.roles, guild.members)
-            seller_mention = mayer_member.mention if mayer_member else seller
-    elif seller.lower() == "noxy":
-        # Buscar usuario con rol de Noxy o similar
-        noxy_role = discord.utils.get(guild.roles, name="Noxy")
-        if noxy_role:
-            noxy_member = discord.utils.find(lambda m: noxy_role in m.roles, guild.members)
-            seller_mention = noxy_member.mention if noxy_member else seller
-
     total = reputation[key]
     embed = discord.Embed(
         title="🛒 COMPRA REGISTRADA",
         description=(
             "> 🔴 **NEXUS STOCK — REPUTACIÓN**\n\n"
-            f"🛒 **{user.mention}** acaba de comprarle una cuenta a {seller_mention}.\n\n"
-            f"📦 **Cuentas compradas:** `{total_server_purchases}`\n\n"
+            f"🛒 **{user.mention}** compró una cuenta a **{credited_member.mention}**.\n\n"
+            f"📦 **Ventas registradas:** `{total}`\n\n"
             "⭐ Gracias por confiar en **Nexus Stock**.\n"
-            "Tu compra ha sido registrada correctamente en nuestro sistema.\n\n"
+            "La venta ha sido registrada correctamente en nuestro sistema.\n\n"
             "🔴 **Nexus Stock • Trusted Stock**"
         ),
         color=config.COLOR_EMBED
     )
-    embed.set_thumbnail(url=user.display_avatar.url)
+    embed.set_thumbnail(url=credited_member.display_avatar.url)
     embed.timestamp = discord.utils.utcnow()
     await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions(users=True))
 
-    if isinstance(user, discord.Member):
-        await apply_purchase_rank(guild, user, total)
+    if isinstance(credited_member, discord.Member):
+        await apply_purchase_rank(guild, credited_member, total)
 
     await maybe_announce_leaderboard(guild, channel, reputation_before, reputation)
 
@@ -1614,11 +1595,21 @@ async def on_message(message):
             mentioned_users = message.mentions
             if mentioned_users:
                 client = mentioned_users[0]  # Usar el primer usuario mencionado como cliente
-                await register_purchase(message.guild, client, seller=seller_name.capitalize())
+                await register_purchase(
+                    message.guild,
+                    client,
+                    seller=seller_name.capitalize(),
+                    credited_member=message.author
+                )
                 logger.info(f"Vouch con $ detectado en canal de {seller_name}, compra registrada para {client.name} (ID: {client.id})")
             else:
                 # Si no hay menciones, intentar registrar al autor del mensaje como cliente
-                await register_purchase(message.guild, message.author, seller=seller_name.capitalize())
+                await register_purchase(
+                    message.guild,
+                    message.author,
+                    seller=seller_name.capitalize(),
+                    credited_member=message.author
+                )
                 logger.info(f"Vouch con $ detectado sin mención en canal de {seller_name}, compra registrada para autor {message.author.name} (ID: {message.author.id})")
 
     try:
@@ -2454,39 +2445,54 @@ async def cerrar_ticket(interaction: discord.Interaction):
 @has_voucher_permission()
 @app_commands.describe(
     cliente="Cliente que compró la cuenta",
-    vendedor="Vendedor de la cuenta (tú, Mayer o Noxy)",
+    vendedor="Vendedor de la cuenta",
     producto="Producto comprado", 
     comentario="Comentario sobre la compra (ej. 10 de 10)",
     imagen="Foto o captura de la compra (opcional)"
 )
-@app_commands.choices(
-    vendedor=[
-        app_commands.Choice(name="Nexus", value="nexus"),
-        app_commands.Choice(name="Mayer", value="mayer"),
-        app_commands.Choice(name="Noxy", value="noxy")
-    ]
-)
 async def vouch(
     interaction: discord.Interaction, 
     cliente: discord.Member,
-    vendedor: app_commands.Choice[str],
+    vendedor: discord.Member,
     producto: str, 
     comentario: str, 
     imagen: Optional[discord.Attachment] = None
 ):
-    # Siempre publicar en el canal de Nexus (canal principal del usuario)
-    channel = get_configured_channel(interaction.guild, config.VOUCHES_CHANNEL_ID, config.VOUCHES_CHANNEL_NAME)
+    await interaction.response.defer(ephemeral=True)
+
+    seller_names = [vendedor.name, vendedor.display_name]
+    seller_names.extend(role.name for role in vendedor.roles)
+    normalized_seller_names = [re.sub(r"[^a-z0-9]", "", name.casefold()) for name in seller_names]
+    seller_key = None
+
+    for configured_key, configured_user_id in config.VOUCHES_SELLER_IDS.items():
+        if configured_user_id and vendedor.id == configured_user_id:
+            seller_key = configured_key
+            break
+    if seller_key is None and vendedor.id == interaction.guild.owner_id:
+        seller_key = "nexus"
+    if seller_key is None:
+        for configured_key in config.VOUCHES_CHANNELS:
+            if any(configured_key in candidate for candidate in normalized_seller_names):
+                seller_key = configured_key
+                break
+
+    channel_config = config.VOUCHES_CHANNELS.get(seller_key) if seller_key else None
+    if channel_config:
+        channel = get_configured_channel(interaction.guild, channel_config["id"], channel_config["name"])
+    else:
+        channel = get_configured_channel(interaction.guild, config.VOUCHES_CHANNEL_ID, config.VOUCHES_CHANNEL_NAME)
     
     if not channel:
-        await interaction.response.send_message("No existe el canal de vouches principal configurado.", ephemeral=True)
+        await interaction.followup.send("No existe el canal de vouches configurado para ese vendedor.", ephemeral=True)
         return
     if imagen and (not imagen.content_type or not imagen.content_type.startswith("image/")):
-        await interaction.response.send_message("La evidencia debe ser una imagen.", ephemeral=True)
+        await interaction.followup.send("La evidencia debe ser una imagen.", ephemeral=True)
         return
     vouch_number = await get_next_vouch_number(channel)
     embed = discord.Embed(title="⭐ NUEVO VOUCH", color=config.COLOR_EMBED)
     embed.add_field(name="👤 Cliente", value=cliente.mention, inline=False)
-    embed.add_field(name="🏪 Vendedor", value=vendedor.name, inline=False)
+    embed.add_field(name="🏪 Vendedor", value=vendedor.mention, inline=False)
     embed.add_field(name="🛒 Producto", value=producto, inline=False)
     embed.add_field(name="💰 Compra", value="Completada", inline=False)
     embed.add_field(name="💬 Comentario", value=f'“{comentario}”', inline=False)
@@ -2494,40 +2500,19 @@ async def vouch(
         embed.set_image(url=imagen.url)
     embed.set_footer(text=f"NEXUS • Vouch #{vouch_number}")
     embed.timestamp = discord.utils.utcnow()
-    
-    # Determinar la mención correcta según el vendedor
-    seller_name = vendedor.value
-    seller_mention = interaction.guild.owner.mention  # Por defecto owner (Nexus)
-    
-    if seller_name == "mayer":
-        # Buscar usuario Mayer por rol o nombre
-        mayer_role = discord.utils.get(interaction.guild.roles, name="Mayer")
-        if mayer_role:
-            mayer_member = discord.utils.find(lambda m: mayer_role in m.roles, interaction.guild.members)
-            seller_mention = mayer_member.mention if mayer_member else "@Mayer"
-        else:
-            seller_mention = "@Mayer"
-    elif seller_name == "noxy":
-        # Buscar usuario Noxy por rol o nombre
-        noxy_role = discord.utils.get(interaction.guild.roles, name="Noxy")
-        if noxy_role:
-            noxy_member = discord.utils.find(lambda m: noxy_role in m.roles, interaction.guild.members)
-            seller_mention = noxy_member.mention if noxy_member else "@Noxy"
-        else:
-            seller_mention = "@Noxy"
-    elif seller_name == "magin":
-        # Buscar usuario Magin por rol o nombre
-        magin_role = discord.utils.get(interaction.guild.roles, name="Magin")
-        if magin_role:
-            magin_member = discord.utils.find(lambda m: magin_role in m.roles, interaction.guild.members)
-            seller_mention = magin_member.mention if magin_member else "@Magin"
-        else:
-            seller_mention = "@Magin"
-    
-    await channel.send(content=f"✅ +1 VOUCH {seller_mention}", embed=embed)
+    await channel.send(
+        content=f"✅ +1 VOUCH • Cliente: {cliente.mention} • Vendedor: {vendedor.mention}",
+        embed=embed,
+        allowed_mentions=discord.AllowedMentions(users=True)
+    )
     if "$" in producto or "$" in comentario:
-        await register_purchase(interaction.guild, cliente, seller=vendedor.name)
-    await interaction.response.send_message("✅ Tu vouch fue publicado.", ephemeral=True)
+        await register_purchase(
+            interaction.guild,
+            cliente,
+            seller=vendedor.display_name,
+            credited_member=vendedor
+        )
+    await interaction.followup.send(f"✅ Vouch publicado en {channel.mention}.", ephemeral=True)
 
 @bot.tree.command(name="top_compradores", description="Muestra el top de compradores de Nexus Stock")
 async def top_compradores(interaction: discord.Interaction):

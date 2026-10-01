@@ -41,6 +41,11 @@ VOUCHES_CHANNELS = {
     "mayer": {"id": None, "name": "✅・mayer-vouches"},
     "noxy": {"id": None, "name": "✅・noxy-vouches"}
 }
+VOUCHES_SELLER_IDS = {
+	"nexus": None,
+	"mayer": None,
+	"noxy": None
+}
 
 # Restricción de comandos por canal
 COMMANDS_RESTRICTION_ENABLED = True
