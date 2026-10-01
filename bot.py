@@ -234,17 +234,22 @@ async def get_next_vouch_number(channel) -> int:
             channel_key = seller_key
             break
 
-    current = config.VOUCH_COUNTER_STARTS.get(channel_key, 0)
-    if channel.topic:
-        match = re.search(r'VOUCH_COUNT:(\d+)', channel.topic)
+    topic = channel.topic or ""
+    reset_marker = f"VOUCH_BASELINE_V1:{channel_key}" if channel_key else None
+    if channel_key and reset_marker not in topic:
+        current = config.VOUCH_COUNTER_STARTS.get(channel_key, 0)
+        topic = f"{topic + ' ' if topic else ''}{reset_marker}"
+    else:
+        current = 0
+        match = re.search(r'VOUCH_COUNT:(\d+)', topic)
         if match:
-            current = max(current, int(match.group(1)))
+            current = int(match.group(1))
     new_count = current + 1
     tag = f"VOUCH_COUNT:{new_count}"
-    if channel.topic and re.search(r'VOUCH_COUNT:\d+', channel.topic):
-        new_topic = re.sub(r'VOUCH_COUNT:\d+', tag, channel.topic)
+    if topic and re.search(r'VOUCH_COUNT:\d+', topic):
+        new_topic = re.sub(r'VOUCH_COUNT:\d+', tag, topic)
     else:
-        new_topic = f"{channel.topic + ' ' if channel.topic else ''}{tag}"
+        new_topic = f"{topic + ' ' if topic else ''}{tag}"
     try:
         await channel.edit(topic=new_topic)
     except discord.Forbidden:
@@ -2635,6 +2640,75 @@ async def vouch(
             credited_member=vendedor
         )
     await interaction.followup.send(f"✅ Vouch publicado en {channel.mention}.", ephemeral=True)
+
+@bot.tree.command(name="vouchdrop", description="Registra un vouch por una cuenta entregada mediante Drop")
+@app_commands.describe(
+    cliente="Persona que recibió la cuenta del Drop",
+    producto="Cuenta o producto entregado",
+    comentario="Comentario del cliente (opcional)",
+    imagen="Foto o captura de la entrega (opcional)"
+)
+async def vouchdrop(
+    interaction: discord.Interaction,
+    cliente: discord.Member,
+    producto: str,
+    comentario: str = "Drop completado",
+    imagen: Optional[discord.Attachment] = None
+):
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message("Este comando solo puede usarse en el servidor.", ephemeral=True)
+        return
+
+    author = interaction.user
+    noxy_id = config.VOUCHES_SELLER_IDS.get("noxy")
+    normalized_author_names = [
+        re.sub(r"[^a-z0-9]", "", name.casefold())
+        for name in [author.name, author.display_name, *(role.name for role in getattr(author, "roles", []))]
+    ]
+    is_noxy = (
+        (noxy_id is not None and author.id == noxy_id)
+        or any("noxy" in name for name in normalized_author_names)
+    )
+    if author.id != guild.owner_id and not is_noxy:
+        await interaction.response.send_message("❌ `/vouchdrop` es solo para Nexus y Noxy.", ephemeral=True)
+        return
+
+    seller_key = "nexus" if author.id == guild.owner_id else "noxy"
+    channel_config = config.VOUCHES_CHANNELS[seller_key]
+    channel = get_configured_channel(guild, channel_config["id"], channel_config["name"])
+    if channel is None:
+        await interaction.response.send_message(
+            f"No encontré el canal de vouches de {seller_key}. Revisa `{channel_config['name']}`.",
+            ephemeral=True
+        )
+        return
+    if imagen and (not imagen.content_type or not imagen.content_type.startswith("image/")):
+        await interaction.response.send_message("La evidencia debe ser una imagen.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    vouch_number = await get_next_vouch_number(channel)
+    embed = discord.Embed(
+        title="⭐ NUEVO VOUCH",
+        color=config.COLOR_EMBED
+    )
+    embed.add_field(name="👤 Cliente", value=cliente.mention, inline=False)
+    embed.add_field(name="🏪 Autor del drop", value=author.mention, inline=False)
+    embed.add_field(name="🎁 Producto", value=producto, inline=False)
+    embed.add_field(name="🎁 Drop", value="Completado", inline=False)
+    embed.add_field(name="💬 Comentario", value=f'“{comentario}”', inline=False)
+    if imagen:
+        embed.set_image(url=imagen.url)
+    embed.set_footer(text=f"NEXUS • Vouch #{vouch_number}")
+    embed.timestamp = discord.utils.utcnow()
+
+    await channel.send(
+        content=f"✅ +1 VOUCH {author.mention}",
+        embed=embed,
+        allowed_mentions=discord.AllowedMentions(users=True)
+    )
+    await interaction.followup.send(f"✅ Vouch de Drop publicado en {channel.mention}.", ephemeral=True)
 
 @bot.tree.command(name="top_compradores", description="Muestra el top de compradores de Nexus Stock")
 async def top_compradores(interaction: discord.Interaction):
