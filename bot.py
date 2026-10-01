@@ -2411,7 +2411,7 @@ async def timeout_cmd(
         ephemeral=True
     )
 
-@bot.tree.command(name="ATH", description="Muestra la información oficial de pago por ATH Móvil")
+@bot.tree.command(name="ath", description="Muestra la información oficial de pago por ATH Móvil")
 async def ath_pago(interaction: discord.Interaction):
     allowed_role_names = {"admin", "admins", "administrador", "administradores", "staff", "founder", "founders", "fundador", "fundadores", "creator", "creators", "creador", "creadores"}
     normalized_roles = {
