@@ -380,6 +380,15 @@ def _top_purchasers(reputation: dict, limit: int):
     buyer_counts = ((uid, count) for uid, count in reputation.items() if uid.isdigit())
     return sorted(buyer_counts, key=lambda item: item[1], reverse=True)[:limit]
 
+async def _get_member_for_leaderboard(guild, user_id: int):
+    member = guild.get_member(user_id)
+    if member:
+        return member
+    try:
+        return await guild.fetch_member(user_id)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return None
+
 async def maybe_announce_leaderboard(guild, channel, reputation_before: dict, reputation_after: dict):
     if not config.LEADERBOARD_ENABLED:
         return
@@ -393,8 +402,8 @@ async def maybe_announce_leaderboard(guild, channel, reputation_before: dict, re
     medals = ["🥇", "🥈", "🥉"]
     lines = []
     for index, (uid, count) in enumerate(after_top, start=1):
-        member = guild.get_member(int(uid))
-        display = member.mention if member else f"Usuario ({uid})"
+        member = await _get_member_for_leaderboard(guild, int(uid))
+        display = member.mention if member else f"Usuario fuera del servidor (`{uid}`)"
         rank_icon = medals[index - 1] if index <= 3 else f"`#{index}`"
         lines.append(f"{rank_icon} {display} — **{count}** cuentas")
 
@@ -405,7 +414,7 @@ async def maybe_announce_leaderboard(guild, channel, reputation_before: dict, re
     )
     embed.set_footer(text="Nexus Stock © Todos los derechos reservados")
     embed.timestamp = discord.utils.utcnow()
-    await channel.send(embed=embed)
+    await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions(users=True))
 
 async def register_purchase(guild, user, amount: int = 1, seller: str = "Nexus", credited_member=None):
     """Registra las compras del cliente y las ventas del vendedor por separado."""
@@ -2639,8 +2648,8 @@ async def top_compradores(interaction: discord.Interaction):
     medals = ["🥇", "🥈", "🥉"]
     lines = []
     for index, (uid, count) in enumerate(top, start=1):
-        member = interaction.guild.get_member(int(uid))
-        display = member.mention if member else f"Usuario ({uid})"
+        member = await _get_member_for_leaderboard(interaction.guild, int(uid))
+        display = member.mention if member else f"Usuario fuera del servidor (`{uid}`)"
         rank_icon = medals[index - 1] if index <= 3 else f"`#{index}`"
         lines.append(f"{rank_icon} {display} — **{count}** cuentas")
 
