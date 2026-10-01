@@ -2173,7 +2173,6 @@ async def on_member_remove(member):
             embed = discord.Embed(
                 title="🔻 NEXUS STOCK",
                 description=(
-                    "> 🔻 **NEXUS STOCK**\n\n"
                     f"**{member.display_name}** ha abandonado nuestra comunidad.\n\n"
                     "🖤 Gracias por haber formado parte de **Nexus Stock**.\n\n"
                     "Esperamos volver a verte pronto.\n\n"
