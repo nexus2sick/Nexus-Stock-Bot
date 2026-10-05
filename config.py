@@ -349,3 +349,112 @@ CAPTCHA_ENABLED = False  # Activar/desactivar verificación por captcha
 ANTI_PHISHING_ENABLED = False  # Activar/desactivar anti-phishing
 ANTI_IP_LOGGER_ENABLED = False  # Activar/desactivar anti-ip logger
 ANTI_INVITE_SPAM_ENABLED = False  # Activar/desactivar anti-spam de invitaciones
+# NexusFN: anuncio del checker (/nexusfn). Las capturas se adjuntan desde estos archivos del proyecto.
+NEXUSFN_IMAGES = ["nexusfn_menu.png", "nexusfn_dashboard.png"]
+NEXUSFN_MESSAGE = """# 🔴 NEXUSFN CHECKER — v2.0.0
+### Desarrollado por Nexus Stock 🇵🇷
+
+Llegó la nueva versión de **NexusFN**: más rápida, organizada y fácil de usar. Compras tu licencia, sigues el tutorial incluido y quedas ready.
+
+╔══════════════════════╗
+                        💵 PLANES
+╚══════════════════════╝
+
+📅 3 días — **$3**
+📅 7 días — **$5**
+📅 30 días — **$15**
+♾️ Lifetime — **$40**
+
+╔══════════════════════╗
+                       🚀 QUÉ TRAE
+╚══════════════════════╝
+
+🔐 Licencias protegidas mediante HWID
+🖥️ Dashboard actualizado en tiempo real
+⚙️ Procesamiento multi-thread
+📂 Resultados separados y organizados
+🧹 Eliminación automática de duplicados
+🔄 Actualizaciones para nuevas versiones
+🛠️ Soporte directo si algo se te complica
+🎥 Tutorial completo incluido para que no te pierdas
+
+╔══════════════════════╗
+                 📚 RECURSOS & TUTORIALES
+╚══════════════════════╝
+
+📢 Viene con canales de telegram y links de paginas en donde puedes comseguir combolistas para el uso de el checker.
+📖 Tutorial completo de instalación y configuración.
+🎥 Guías paso a paso para utilizar NexusFN correctamente.
+🧩 Tutoriales de configuración para las diferentes opciones compatibles.
+🔐 Guías de configuración de seguridad y autenticación.
+
+🎮 BYPASSER CON SU TUTORIAL INCLUIDO PARA EVITAR EL 2FA DE LAS SIGUIENTES PLATAFORMAS:
+
+• Nintendo
+• Xbox
+• Facebook
+• Google
+
+NOTA: PUEDES ALMACENAR LAS CUENTAS BYPASEADAS Y ENTRAR A LOS AJUSTES DE EPIC, COPIAR EXCHANGE CODE PARA ENTRAR A EPIC DESDE UN LINK Y ENTRAR A EL JUEGO DESDE EL PROGRAMA CON LA CUENTA SELECCIONADA
+
+📚 Todo viene acompañado de tutoriales para que puedas configurar y utilizar cada apartado correctamente.
+
+╔══════════════════════╗
+                 💻 ¿QUÉ NECESITAS?
+╚══════════════════════╝
+
+🪟 Windows 10 / Windows 11
+🌐 Conexión a Internet estable
+💻 PC compatible con el programa
+🔑 Una licencia activa de NexusFN
+📧 Funciona solo con combos HOTMAIL / OUTLOOK / LIVE
+📖 Seguir el tutorial incluido
+
+No necesitas configuraciones complicadas. Una vez tengas tu licencia, sigue el tutorial y realiza la activación en tu PC.
+
+╔══════════════════════╗
+                    ⚙️ ¿CÓMO FUNCIONA?
+╚══════════════════════╝
+
+1️⃣ Compras el plan que quieras.
+2️⃣ Recibes tu licencia.
+3️⃣ Descargas NexusFN.
+4️⃣ Sigues el tutorial incluido.
+5️⃣ Activas tu licencia en tu PC.
+6️⃣ El sistema verifica la licencia y el HWID.
+7️⃣ Una vez validado, puedes utilizar el programa.
+8️⃣ El dashboard muestra el progreso y los resultados del proceso en tiempo real.
+
+🔐 Tu licencia queda vinculada al primer PC donde se activa.
+
+╔══════════════════════╗
+                    📌 IMPORTANTE
+╚══════════════════════╝
+
+• Cada licencia queda vinculada a un solo PC.
+• Sigue el tutorial antes de utilizar el programa.
+• No compartas tu licencia con otras personas.
+• Las licencias tienen la duración del plan comprado.
+• Si cambias de PC, puedes solicitar un HWID Reset mediante soporte.
+• Si tienes algún problema, tranquilo: tira un ticket y verificamos qué pasó.
+
+╔══════════════════════╗
+                          💳 PAGOS
+╚══════════════════════╝
+
+• ATH Móvil
+• PayPal — Amigos y Familiares
+• Litecoin (LTC)
+• Bitcoin (BTC)
+
+╔══════════════════════╗
+                    🛒 ¿LO QUIERES?
+╚══════════════════════╝
+
+No des más vueltas, tira un ticket aquí:
+
+(👉 <#1509367067269136414> 👈)
+
+Dinos cuál plan quieres y te atendemos tan pronto estemos disponibles.
+
+📢 Las actualizaciones y avisos de **NexusFN v2.0.0** se publicarán en este canal."""

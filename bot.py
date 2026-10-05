@@ -421,6 +421,13 @@ async def maybe_announce_leaderboard(guild, channel, reputation_before: dict, re
     embed.timestamp = discord.utils.utcnow()
     await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions(users=True))
 
+def counts_as_account_purchase(product: str, extra_text: str = "") -> bool:
+    """Una compra cuenta para reputación solo si el producto es una cuenta y hay signo $."""
+    product_text = (product or "").casefold()
+    is_account = bool(re.search(r"\b(cuentas?|accounts?)\b", product_text))
+    has_price = "$" in product_text or "$" in (extra_text or "")
+    return is_account and has_price
+
 async def register_purchase(guild, user, amount: int = 1, seller: str = "Nexus", credited_member=None):
     """Registra las compras del cliente y las ventas del vendedor por separado."""
     if not config.REPUTATION_ENABLED:
@@ -1680,7 +1687,7 @@ async def on_message(message):
                 is_friend_vouch_channel = True
                 break
         
-        if is_friend_vouch_channel and "$" in message.content:
+        if is_friend_vouch_channel and counts_as_account_purchase(message.content):
             # Extraer el cliente mencionado en el vouch
             mentioned_users = message.mentions
             if mentioned_users:
@@ -2462,6 +2469,35 @@ async def ath_pago(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=embed)
 
+@bot.tree.command(name="nexusfn", description="Publica el anuncio oficial de NexusFN Checker")
+@has_admin_role()
+async def nexusfn(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    files = []
+    missing = []
+    for image_name in config.NEXUSFN_IMAGES:
+        image_path = os.path.join(base_dir, image_name)
+        if os.path.isfile(image_path):
+            files.append(discord.File(image_path))
+        else:
+            missing.append(image_name)
+
+    embed = discord.Embed(description=config.NEXUSFN_MESSAGE, color=config.COLOR_EMBED)
+    embed.set_footer(text="Nexus Stock © Todos los derechos reservados")
+    await interaction.channel.send(
+        content="@everyone",
+        embed=embed,
+        files=files,
+        allowed_mentions=discord.AllowedMentions(everyone=True)
+    )
+
+    confirmation = "✅ Anuncio de NexusFN publicado."
+    if missing:
+        confirmation += f"\n⚠️ No encontré estas imágenes y no se adjuntaron: {', '.join(missing)}"
+    await interaction.followup.send(confirmation, ephemeral=True)
+
 @bot.command(name="embed")
 @commands.has_role(config.ADMIN_ROLE_ID)
 async def embed_cmd(ctx, titulo: str, *, resto: str):
@@ -2575,19 +2611,19 @@ async def cerrar_ticket(interaction: discord.Interaction):
     vendedor="Vendedor de la cuenta",
     producto="Producto comprado", 
     comentario="Comentario sobre la compra (ej. 10 de 10)",
-    imagen="Foto o captura de la compra (opcional)"
+    imagen="Foto o captura de la compra"
 )
 async def vouch(
     interaction: discord.Interaction, 
     cliente: discord.Member,
     vendedor: discord.Member,
     producto: str, 
-    comentario: str, 
-    imagen: Optional[discord.Attachment] = None
+    comentario: str,
+    imagen: discord.Attachment
 ):
     await interaction.response.defer(ephemeral=True)
 
-    seller_names = [vendedor.name, vendedor.display_name]
+    seller_names= [vendedor.name, vendedor.display_name]
     seller_names.extend(role.name for role in vendedor.roles)
     normalized_seller_names = [re.sub(r"[^a-z0-9]", "", name.casefold()) for name in seller_names]
     seller_key = None
@@ -2613,7 +2649,7 @@ async def vouch(
     if not channel:
         await interaction.followup.send("No existe el canal de vouches configurado para ese vendedor.", ephemeral=True)
         return
-    if imagen and (not imagen.content_type or not imagen.content_type.startswith("image/")):
+    if not imagen.content_type or not imagen.content_type.startswith("image/"):
         await interaction.followup.send("La evidencia debe ser una imagen.", ephemeral=True)
         return
     vouch_number = await get_next_vouch_number(channel)
@@ -2623,8 +2659,7 @@ async def vouch(
     embed.add_field(name="🛒 Producto", value=producto, inline=False)
     embed.add_field(name="💰 Compra", value="Completada", inline=False)
     embed.add_field(name="💬 Comentario", value=f'“{comentario}”', inline=False)
-    if imagen:
-        embed.set_image(url=imagen.url)
+    embed.set_image(url=imagen.url)
     embed.set_footer(text=f"NEXUS • Vouch #{vouch_number}")
     embed.timestamp = discord.utils.utcnow()
     await channel.send(
@@ -2632,7 +2667,7 @@ async def vouch(
         embed=embed,
         allowed_mentions=discord.AllowedMentions(users=True)
     )
-    if "$" in producto or "$" in comentario:
+    if counts_as_account_purchase(producto, comentario):
         await register_purchase(
             interaction.guild,
             cliente,
@@ -2641,40 +2676,49 @@ async def vouch(
         )
     await interaction.followup.send(f"✅ Vouch publicado en {channel.mention}.", ephemeral=True)
 
+def resolve_drop_author_key(guild, member) -> Optional[str]:
+    """Devuelve 'nexus' o 'noxy' según quién sea el miembro; None si no es ninguno de los dos."""
+    if member.id == guild.owner_id:
+        return "nexus"
+    for seller_key in ("nexus", "noxy"):
+        configured_id = config.VOUCHES_SELLER_IDS.get(seller_key)
+        if configured_id is not None and member.id == configured_id:
+            return seller_key
+    names = [member.name, member.display_name, *(role.name for role in getattr(member, "roles", []))]
+    if any("noxy" in re.sub(r"[^a-z0-9]", "", name.casefold()) for name in names):
+        return "noxy"
+    return None
+
 @bot.tree.command(name="vouchdrop", description="Registra un vouch por una cuenta entregada mediante Drop")
 @app_commands.describe(
-    cliente="Persona que recibió la cuenta del Drop",
-    producto="Cuenta o producto entregado",
+    cliente="Persona que está reclamando su drop",
+    autor="Persona que está dropeando la cuenta (Nexus o Noxy)",
+    producto="Cuenta o producto que se dropeo y qué incluía",
     comentario="Comentario del cliente (opcional)",
-    imagen="Foto o captura de la entrega (opcional)"
+    imagen="Foto o captura de la entrega"
 )
 async def vouchdrop(
     interaction: discord.Interaction,
     cliente: discord.Member,
+    autor: discord.Member,
     producto: str,
-    comentario: str = "Drop completado",
-    imagen: Optional[discord.Attachment] = None
+    comentario: str,
+    imagen: discord.Attachment
 ):
     guild = interaction.guild
     if guild is None:
         await interaction.response.send_message("Este comando solo puede usarse en el servidor.", ephemeral=True)
         return
 
-    author = interaction.user
-    noxy_id = config.VOUCHES_SELLER_IDS.get("noxy")
-    normalized_author_names = [
-        re.sub(r"[^a-z0-9]", "", name.casefold())
-        for name in [author.name, author.display_name, *(role.name for role in getattr(author, "roles", []))]
-    ]
-    is_noxy = (
-        (noxy_id is not None and author.id == noxy_id)
-        or any("noxy" in name for name in normalized_author_names)
-    )
-    if author.id != guild.owner_id and not is_noxy:
+    if resolve_drop_author_key(guild, interaction.user) is None:
         await interaction.response.send_message("❌ `/vouchdrop` es solo para Nexus y Noxy.", ephemeral=True)
         return
 
-    seller_key = "nexus" if author.id == guild.owner_id else "noxy"
+    seller_key = resolve_drop_author_key(guild, autor)
+    if seller_key is None:
+        await interaction.response.send_message("❌ El autor del drop debe ser Nexus o Noxy.", ephemeral=True)
+        return
+
     channel_config = config.VOUCHES_CHANNELS[seller_key]
     channel = get_configured_channel(guild, channel_config["id"], channel_config["name"])
     if channel is None:
@@ -2683,7 +2727,7 @@ async def vouchdrop(
             ephemeral=True
         )
         return
-    if imagen and (not imagen.content_type or not imagen.content_type.startswith("image/")):
+    if not imagen.content_type or not imagen.content_type.startswith("image/"):
         await interaction.response.send_message("La evidencia debe ser una imagen.", ephemeral=True)
         return
 
@@ -2694,17 +2738,16 @@ async def vouchdrop(
         color=config.COLOR_EMBED
     )
     embed.add_field(name="👤 Cliente", value=cliente.mention, inline=False)
-    embed.add_field(name="🏪 Autor del drop", value=author.mention, inline=False)
+    embed.add_field(name="🏪 Autor del drop", value=autor.mention, inline=False)
     embed.add_field(name="🎁 Producto", value=producto, inline=False)
     embed.add_field(name="🎁 Drop", value="Completado", inline=False)
     embed.add_field(name="💬 Comentario", value=f'“{comentario}”', inline=False)
-    if imagen:
-        embed.set_image(url=imagen.url)
+    embed.set_image(url=imagen.url)
     embed.set_footer(text=f"NEXUS • Vouch #{vouch_number}")
     embed.timestamp = discord.utils.utcnow()
 
     await channel.send(
-        content=f"✅ +1 VOUCH {author.mention}",
+        content=f"✅ +1 VOUCH {autor.mention}",
         embed=embed,
         allowed_mentions=discord.AllowedMentions(users=True)
     )
