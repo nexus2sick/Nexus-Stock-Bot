@@ -356,18 +356,22 @@ NEXUSFN_MESSAGE = """# 🔴 NEXUSFN CHECKER — v2.0.0
 
 Llegó la nueva versión de **NexusFN**: más rápida, organizada y fácil de usar. Compras tu licencia, sigues el tutorial incluido y quedas ready.
 
-╔══════════════════════╗
-                        💵 PLANES
-╚══════════════════════╝
+```
+╔════════════════════════════╗
+          💵 PLANES
+╚════════════════════════════╝
+```
 
 📅 3 días — **$3**
 📅 7 días — **$5**
 📅 30 días — **$15**
 ♾️ Lifetime — **$40**
 
-╔══════════════════════╗
-                       🚀 QUÉ TRAE
-╚══════════════════════╝
+```
+╔════════════════════════════╗
+         🚀 QUÉ TRAE
+╚════════════════════════════╝
+```
 
 🔐 Licencias protegidas mediante HWID
 🖥️ Dashboard actualizado en tiempo real
@@ -378,9 +382,11 @@ Llegó la nueva versión de **NexusFN**: más rápida, organizada y fácil de us
 🛠️ Soporte directo si algo se te complica
 🎥 Tutorial completo incluido para que no te pierdas
 
-╔══════════════════════╗
-                 📚 RECURSOS & TUTORIALES
-╚══════════════════════╝
+```
+╔════════════════════════════╗
+   📚 RECURSOS & TUTORIALES
+╚════════════════════════════╝
+```
 
 📢 Viene con canales de telegram y links de paginas en donde puedes comseguir combolistas para el uso de el checker.
 📖 Tutorial completo de instalación y configuración.
@@ -399,9 +405,11 @@ NOTA: PUEDES ALMACENAR LAS CUENTAS BYPASEADAS Y ENTRAR A LOS AJUSTES DE EPIC, CO
 
 📚 Todo viene acompañado de tutoriales para que puedas configurar y utilizar cada apartado correctamente.
 
-╔══════════════════════╗
-                 💻 ¿QUÉ NECESITAS?
-╚══════════════════════╝
+```
+╔════════════════════════════╗
+      💻 ¿QUÉ NECESITAS?
+╚════════════════════════════╝
+```
 
 🪟 Windows 10 / Windows 11
 🌐 Conexión a Internet estable
@@ -412,9 +420,11 @@ NOTA: PUEDES ALMACENAR LAS CUENTAS BYPASEADAS Y ENTRAR A LOS AJUSTES DE EPIC, CO
 
 No necesitas configuraciones complicadas. Una vez tengas tu licencia, sigue el tutorial y realiza la activación en tu PC.
 
-╔══════════════════════╗
-                    ⚙️ ¿CÓMO FUNCIONA?
-╚══════════════════════╝
+```
+╔════════════════════════════╗
+      ⚙️ ¿CÓMO FUNCIONA?
+╚════════════════════════════╝
+```
 
 1️⃣ Compras el plan que quieras.
 2️⃣ Recibes tu licencia.
@@ -427,9 +437,11 @@ No necesitas configuraciones complicadas. Una vez tengas tu licencia, sigue el t
 
 🔐 Tu licencia queda vinculada al primer PC donde se activa.
 
-╔══════════════════════╗
-                    📌 IMPORTANTE
-╚══════════════════════╝
+```
+╔════════════════════════════╗
+        📌 IMPORTANTE
+╚════════════════════════════╝
+```
 
 • Cada licencia queda vinculada a un solo PC.
 • Sigue el tutorial antes de utilizar el programa.
@@ -438,18 +450,22 @@ No necesitas configuraciones complicadas. Una vez tengas tu licencia, sigue el t
 • Si cambias de PC, puedes solicitar un HWID Reset mediante soporte.
 • Si tienes algún problema, tranquilo: tira un ticket y verificamos qué pasó.
 
-╔══════════════════════╗
-                          💳 PAGOS
-╚══════════════════════╝
+```
+╔════════════════════════════╗
+           💳 PAGOS
+╚════════════════════════════╝
+```
 
 • ATH Móvil
 • PayPal — Amigos y Familiares
 • Litecoin (LTC)
 • Bitcoin (BTC)
 
-╔══════════════════════╗
-                    🛒 ¿LO QUIERES?
-╚══════════════════════╝
+```
+╔════════════════════════════╗
+       🛒 ¿LO QUIERES?
+╚════════════════════════════╝
+```
 
 No des más vueltas, tira un ticket aquí:
 
