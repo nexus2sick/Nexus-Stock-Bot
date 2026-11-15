@@ -61,6 +61,7 @@ COMMANDS_CHANNEL_NAME = "🔧・comandos"
 # Nexus Drop
 DROP_CHANNEL_ID = None
 DROP_CHANNEL_NAME = "drops"
+TICKET_OPEN_CHANNEL_ID = 1509367067269136414  # Canal donde se abren tickets para reclamar un Drop
 
 # Reputación (Nexus Reputation)
 REPUTATION_ENABLED = True

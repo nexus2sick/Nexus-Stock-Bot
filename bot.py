@@ -315,6 +315,20 @@ def can_manage_drop(member):
     )
 
 
+def can_view_drop_participants(drop, member):
+    guild = member.guild
+    if drop.get("creator_id") == member.id or member.id == guild.owner_id:
+        return True
+    if member.guild_permissions.administrator:
+        return True
+
+    co_admin_role = get_co_admin_role(guild)
+    if co_admin_role is not None and co_admin_role in member.roles:
+        return True
+    admin_role = guild.get_role(config.ADMIN_ROLE_ID) if config.ADMIN_ROLE_ID else None
+    return admin_role is not None and admin_role in member.roles
+
+
 async def initialize_drop_store():
     if reputation_pool is None:
         return
@@ -326,6 +340,7 @@ async def initialize_drop_store():
                 message_id BIGINT PRIMARY KEY,
                 guild_id BIGINT NOT NULL,
                 channel_id BIGINT NOT NULL,
+                creator_id BIGINT,
                 prize TEXT NOT NULL,
                 description TEXT NOT NULL,
                 image_url TEXT,
@@ -342,6 +357,12 @@ async def initialize_drop_store():
             """
             ALTER TABLE nexus_drops
             ADD COLUMN IF NOT EXISTS result_published BOOLEAN NOT NULL DEFAULT FALSE
+            """
+        )
+        await connection.execute(
+            """
+            ALTER TABLE nexus_drops
+            ADD COLUMN IF NOT EXISTS creator_id BIGINT
             """
         )
 
@@ -372,6 +393,7 @@ def _drop_from_row(row):
         "message_id": row["message_id"],
         "guild_id": row["guild_id"],
         "channel_id": row["channel_id"],
+        "creator_id": row["creator_id"],
         "prize": row["prize"],
         "description": row["description"],
         "image_url": row["image_url"],
@@ -390,14 +412,15 @@ async def create_drop_record(drop):
             await connection.execute(
                 """
                 INSERT INTO nexus_drops (
-                    message_id, guild_id, channel_id, prize, description, image_url,
+                    message_id, guild_id, channel_id, creator_id, prize, description, image_url,
                     winners_count, participants, winner_ids, end_time, ended
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, FALSE)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, FALSE)
                 """,
                 drop["message_id"],
                 drop["guild_id"],
                 drop["channel_id"],
+                drop["creator_id"],
                 drop["prize"],
                 drop["description"],
                 drop["image_url"],
@@ -419,7 +442,7 @@ async def list_active_drops():
         async with reputation_pool.acquire() as connection:
             rows = await connection.fetch(
                 """
-                SELECT message_id, guild_id, channel_id, prize, description, image_url,
+                SELECT message_id, guild_id, channel_id, creator_id, prize, description, image_url,
                        winners_count, participants::text AS participants,
                        winner_ids::text AS winner_ids, end_time, ended, result_published
                 FROM nexus_drops
@@ -432,12 +455,34 @@ async def list_active_drops():
         return [drop for drop in _read_drop_file() if not drop.get("ended", False)]
 
 
+async def get_drop_record(message_id):
+    if reputation_pool is not None:
+        async with reputation_pool.acquire() as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT message_id, guild_id, channel_id, creator_id, prize, description, image_url,
+                       winners_count, participants::text AS participants,
+                       winner_ids::text AS winner_ids, end_time, ended, result_published
+                FROM nexus_drops
+                WHERE message_id = $1
+                """,
+                message_id,
+            )
+        return _drop_from_row(row) if row is not None else None
+
+    async with drop_store_lock:
+        return next(
+            (drop for drop in _read_drop_file() if drop["message_id"] == message_id),
+            None,
+        )
+
+
 async def list_pending_drop_results():
     if reputation_pool is not None:
         async with reputation_pool.acquire() as connection:
             rows = await connection.fetch(
                 """
-                SELECT message_id, guild_id, channel_id, prize, description, image_url,
+                SELECT message_id, guild_id, channel_id, creator_id, prize, description, image_url,
                        winners_count, participants::text AS participants,
                        winner_ids::text AS winner_ids, end_time, ended, result_published
                 FROM nexus_drops
@@ -476,7 +521,7 @@ async def add_drop_participant(message_id, user_id):
             async with connection.transaction():
                 row = await connection.fetchrow(
                     """
-                    SELECT message_id, guild_id, channel_id, prize, description, image_url,
+                    SELECT message_id, guild_id, channel_id, creator_id, prize, description, image_url,
                            winners_count, participants::text AS participants,
                            winner_ids::text AS winner_ids, end_time, ended, result_published
                     FROM nexus_drops
@@ -522,7 +567,7 @@ async def finish_drop_record(message_id):
             async with connection.transaction():
                 row = await connection.fetchrow(
                     """
-                    SELECT message_id, guild_id, channel_id, prize, description, image_url,
+                    SELECT message_id, guild_id, channel_id, creator_id, prize, description, image_url,
                            winners_count, participants::text AS participants,
                            winner_ids::text AS winner_ids, end_time, ended, result_published
                     FROM nexus_drops
@@ -608,7 +653,22 @@ async def publish_drop_result(drop):
 
         if drop["winner_ids"]:
             winners = ", ".join(f"<@{user_id}>" for user_id in drop["winner_ids"])
-            content = f"🎉 ¡Felicidades {winners}! Ganaste **{drop['prize']}**."
+            ticket_channel = bot.get_channel(config.TICKET_OPEN_CHANNEL_ID)
+            ticket_mention = (
+                ticket_channel.mention
+                if ticket_channel is not None
+                else f"<#{config.TICKET_OPEN_CHANNEL_ID}>"
+            )
+            if len(drop["winner_ids"]) == 1:
+                content = (
+                    f"🎉 ¡Felicidades {winners}! Ganaste **{drop['prize']}**. "
+                    f"Abre un ticket en {ticket_mention} para reclamarlo."
+                )
+            else:
+                content = (
+                    f"🎉 ¡Felicidades {winners}! Ganaron **{drop['prize']}**. "
+                    f"Abran un ticket en {ticket_mention} para reclamarlo."
+                )
             allowed_mentions = discord.AllowedMentions(users=True, roles=False, everyone=False)
         else:
             content = f"El Drop de **{drop['prize']}** terminó sin participantes."
@@ -1122,6 +1182,7 @@ class DropView(discord.ui.View):
         style=discord.ButtonStyle.success,
         emoji="🎉",
         custom_id="nexus_drop_participate",
+        row=0,
     )
     async def participate(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
@@ -1159,6 +1220,7 @@ class DropView(discord.ui.View):
         style=discord.ButtonStyle.secondary,
         emoji="🔒",
         custom_id="nexus_drop_finish",
+        row=1,
     )
     async def finish(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.guild is None or not can_manage_drop(interaction.user):
@@ -1183,6 +1245,60 @@ class DropView(discord.ui.View):
             logger.exception(f"Error finalizando Drop {interaction.message.id}: {error}")
             await interaction.followup.send(
                 "El Drop no pudo finalizarse correctamente. Revisa los logs del bot.",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(
+        label="PARTICIPANTES",
+        style=discord.ButtonStyle.secondary,
+        emoji="👥",
+        custom_id="nexus_drop_participants",
+        row=1,
+    )
+    async def participants(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Este botón solo funciona dentro del servidor.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            drop = await get_drop_record(interaction.message.id)
+            if drop is None:
+                await interaction.followup.send("Este Drop ya no está registrado.", ephemeral=True)
+                return
+            if not can_view_drop_participants(drop, interaction.user):
+                await interaction.followup.send(
+                    "❌ Solo quien creó el Drop o el Staff autorizado puede ver los participantes.",
+                    ephemeral=True,
+                )
+                return
+
+            participant_ids = drop["participants"]
+            if not participant_ids:
+                await interaction.followup.send("Todavía no hay participantes.", ephemeral=True)
+                return
+
+            batches = [
+                participant_ids[index:index + 50]
+                for index in range(0, len(participant_ids), 50)
+            ]
+            for index, batch in enumerate(batches, start=1):
+                participants = "\n".join(f"• <@{user_id}>" for user_id in batch)
+                header = f"👥 **Participantes ({len(participant_ids)})**"
+                if len(batches) > 1:
+                    header += f" — página {index}/{len(batches)}"
+                await interaction.followup.send(
+                    f"{header}\n{participants}",
+                    ephemeral=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+        except Exception as error:
+            logger.exception(f"Error mostrando participantes del Drop {interaction.message.id}: {error}")
+            await interaction.followup.send(
+                "No pude cargar la lista de participantes.",
                 ephemeral=True,
             )
 
@@ -4769,6 +4885,7 @@ async def create_drop_command(
         "message_id": None,
         "guild_id": interaction.guild.id,
         "channel_id": channel.id,
+        "creator_id": interaction.user.id,
         "prize": prize,
         "description": description,
         "image_url": image_url,
@@ -4799,6 +4916,29 @@ async def create_drop_command(
         return
 
     drop["message_id"] = message.id
+    if image_file is not None:
+        if not message.attachments:
+            logger.error(f"Discord no devolvió el adjunto del Drop {message.id}")
+            try:
+                await message.edit(view=None)
+            except discord.HTTPException as edit_error:
+                logger.error(f"No pude desactivar el Drop sin imagen {message.id}: {edit_error}")
+            await interaction.followup.send(
+                "Discord no confirmó la imagen adjunta; el Drop se publicó sin activar sus botones.",
+                ephemeral=True,
+            )
+            return
+
+        drop["image_url"] = message.attachments[0].url
+        try:
+            await message.edit(
+                embed=build_drop_embed(drop),
+                view=DropView(),
+                attachments=message.attachments,
+            )
+        except discord.HTTPException as error:
+            logger.warning(f"No pude actualizar la URL de imagen del Drop {message.id}: {error}")
+
     try:
         await create_drop_record(drop)
     except Exception as error:

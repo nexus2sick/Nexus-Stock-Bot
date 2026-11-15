@@ -38,13 +38,17 @@ El comando `/drop` pide premio, descripción, imagen adjunta opcional, duración
 cantidad de ganadores. La imagen se adjunta directamente desde Discord, igual que
 en `/vouch`; el bot la vuelve a adjuntar al mensaje del Drop. Solo el dueño o Staff
 autorizado puede crear o finalizar Drops. La participación está abierta a los
-miembros del servidor.
+miembros del servidor. El botón `PARTICIPANTES` muestra la lista de inscritos de
+forma privada solo al creador del Drop o al Staff autorizado. Discord muestra los
+botones en el mensaje público; el bot rechaza los clics de usuarios no autorizados.
 
 Configura `DROP_CHANNEL_NAME = "drops"` o indica el ID en `DROP_CHANNEL_ID`. El
 comando y el envío del formulario se validan en ese canal; fuera de él, `/drop`
 responde con un aviso y no publica nada.
 La duración permitida es de 1 minuto a 30 días y acepta formatos como `10m`, `1h`
 o `2d`; se permiten de 1 a 20 ganadores.
+Al ganar, se anuncia al usuario y se le indica que abra un ticket en
+`TICKET_OPEN_CHANNEL_ID` para reclamar el premio.
 
 Los Drops, participantes y resultados se guardan en la tabla PostgreSQL
 `nexus_drops` cuando `DATABASE_URL` está configurada, y sus botones siguen
