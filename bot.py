@@ -3434,7 +3434,7 @@ async def ath_pago(interaction: discord.Interaction):
         return
 
     embed = discord.Embed(
-        title="💙 ATH MÓVIL",
+        title="🔴 ATH MÓVIL",
         description=(
             "━━━━━━━━━━━━━━━━━━━━\n\n"
             "📱 **NÚMERO DE TELÉFONO**\n"
@@ -3445,9 +3445,9 @@ async def ath_pago(interaction: discord.Interaction):
             "Al realizar el pago, **envía únicamente el dinero**.\n"
             "❌ **NO escribas ninguna nota, mensaje o comentario** junto al pago.\n\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            "💙 **NEXUS PAYMENTS**"
+            "🔴 **NEXUS PAYMENTS**"
         ),
-        color=0x3498DB
+        color=config.COLOR_EMBED
     )
     await interaction.response.send_message(embed=embed)
 
