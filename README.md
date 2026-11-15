@@ -34,13 +34,15 @@ existentes y nuevos al conectarse.
 
 ## Nexus Drop
 
-El comando `/drop` abre un formulario para premio, descripción, URL opcional de
-imagen, duración y cantidad de ganadores. Solo el dueño o Staff autorizado puede
-crear o finalizar Drops. La participación está abierta a los miembros del servidor.
+El comando `/drop` pide premio, descripción, imagen adjunta opcional, duración y
+cantidad de ganadores. La imagen se adjunta directamente desde Discord, igual que
+en `/vouch`; el bot la vuelve a adjuntar al mensaje del Drop. Solo el dueño o Staff
+autorizado puede crear o finalizar Drops. La participación está abierta a los
+miembros del servidor.
 
 Configura `DROP_CHANNEL_NAME = "drops"` o indica el ID en `DROP_CHANNEL_ID`. El
 comando y el envío del formulario se validan en ese canal; fuera de él, `/drop`
-responde con un aviso y no publica nada. La imagen se proporciona mediante una URL.
+responde con un aviso y no publica nada.
 La duración permitida es de 1 minuto a 30 días y acepta formatos como `10m`, `1h`
 o `2d`; se permiten de 1 a 20 ganadores.
 

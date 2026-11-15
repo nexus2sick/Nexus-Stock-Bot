@@ -16,7 +16,6 @@ import json
 from datetime import datetime, timedelta
 import pytz
 import random
-from urllib.parse import urlsplit
 
 def has_admin_role():
     """Permite comandos administrativos únicamente al dueño del servidor."""
@@ -601,7 +600,11 @@ async def publish_drop_result(drop):
         if channel is None:
             channel = await bot.fetch_channel(drop["channel_id"])
         message = await channel.fetch_message(drop["message_id"])
-        await message.edit(embed=build_drop_embed(drop), view=None)
+        await message.edit(
+            embed=build_drop_embed(drop),
+            view=None,
+            attachments=message.attachments,
+        )
 
         if drop["winner_ids"]:
             winners = ", ".join(f"<@{user_id}>" for user_id in drop["winner_ids"])
@@ -1138,7 +1141,11 @@ class DropView(discord.ui.View):
                 await interaction.followup.send("Ya estás participando en este Drop.", ephemeral=True)
                 return
 
-            await interaction.message.edit(embed=build_drop_embed(drop), view=self)
+            await interaction.message.edit(
+                embed=build_drop_embed(drop),
+                view=self,
+                attachments=interaction.message.attachments,
+            )
             await interaction.followup.send("¡Ya estás participando en el Drop!", ephemeral=True)
         except Exception as error:
             logger.exception(f"Error registrando participante en Drop {interaction.message.id}: {error}")
@@ -1178,143 +1185,6 @@ class DropView(discord.ui.View):
                 "El Drop no pudo finalizarse correctamente. Revisa los logs del bot.",
                 ephemeral=True,
             )
-
-
-class DropCreationModal(discord.ui.Modal, title="Configurar Nexus Drop"):
-    prize = discord.ui.TextInput(label="Premio", max_length=100, placeholder="Cuenta de Fortnite")
-    description = discord.ui.TextInput(
-        label="Descripción",
-        style=discord.TextStyle.paragraph,
-        max_length=1024,
-        placeholder="Información del premio",
-    )
-    image_url = discord.ui.TextInput(
-        label="Imagen (URL opcional)",
-        required=False,
-        max_length=1000,
-        placeholder="https://.../imagen.png",
-    )
-    duration = discord.ui.TextInput(
-        label="Duración",
-        max_length=10,
-        placeholder="10m, 30m, 1h",
-    )
-    winners_count = discord.ui.TextInput(
-        label="Cantidad de ganadores",
-        max_length=2,
-        placeholder="1",
-    )
-
-    def __init__(self, guild_id: int, channel_id: int):
-        super().__init__()
-        self.guild_id = guild_id
-        self.channel_id = channel_id
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if (
-            interaction.guild is None
-            or interaction.guild.id != self.guild_id
-            or interaction.channel_id != self.channel_id
-            or not is_drop_channel(interaction.guild, interaction.channel_id)
-        ):
-            await interaction.response.send_message(
-                f"Este formulario solo se puede enviar en #{config.DROP_CHANNEL_NAME}.",
-                ephemeral=True,
-            )
-            return
-        if not can_manage_drop(interaction.user):
-            await interaction.response.send_message(
-                "❌ Solo el dueño o el Staff autorizado puede crear un Drop.",
-                ephemeral=True,
-            )
-            return
-
-        prize = self.prize.value.strip()
-        description = self.description.value.strip()
-        if not prize or not description:
-            await interaction.response.send_message(
-                "El premio y la descripción no pueden quedar vacíos.",
-                ephemeral=True,
-            )
-            return
-
-        duration_seconds = parse_duration(self.duration.value.strip())
-        if duration_seconds is None or not 60 <= duration_seconds <= 30 * 86400:
-            await interaction.response.send_message(
-                "La duración debe ser de al menos 1 minuto y como máximo 30 días "
-                "(por ejemplo: `10m`, `30m`, `1h` o `2d`).",
-                ephemeral=True,
-            )
-            return
-        try:
-            winners_count = int(self.winners_count.value.strip())
-        except ValueError:
-            winners_count = 0
-        if not 1 <= winners_count <= 20:
-            await interaction.response.send_message(
-                "La cantidad de ganadores debe estar entre 1 y 20.",
-                ephemeral=True,
-            )
-            return
-
-        image_url = self.image_url.value.strip()
-        if image_url:
-            parsed_url = urlsplit(image_url)
-            if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
-                await interaction.response.send_message(
-                    "La imagen debe ser una URL válida que empiece con `http://` o `https://`.",
-                    ephemeral=True,
-                )
-                return
-
-        channel = interaction.channel
-        end_time = discord.utils.utcnow().timestamp() + duration_seconds
-        drop = {
-            "message_id": None,
-            "guild_id": interaction.guild.id,
-            "channel_id": channel.id,
-            "prize": prize,
-            "description": description,
-            "image_url": image_url or None,
-            "winners_count": winners_count,
-            "participants": [],
-            "winner_ids": [],
-            "end_time": end_time,
-            "ended": False,
-            "result_published": False,
-        }
-
-        await interaction.response.defer(ephemeral=True)
-        try:
-            message = await channel.send(
-                embed=build_drop_embed(drop),
-                view=DropView(),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        except Exception as error:
-            logger.exception(f"No pude publicar el Drop en #{channel.name}: {error}")
-            await interaction.followup.send(
-                "No pude publicar el Drop en este canal. Verifica los permisos del bot.",
-                ephemeral=True,
-            )
-            return
-
-        drop["message_id"] = message.id
-        try:
-            await create_drop_record(drop)
-        except Exception as error:
-            logger.exception(f"No pude guardar el Drop {message.id}: {error}")
-            try:
-                await message.edit(view=None)
-            except discord.HTTPException as edit_error:
-                logger.error(f"No pude desactivar el Drop sin registrar {message.id}: {edit_error}")
-            await interaction.followup.send(
-                "No pude guardar el Drop, así que sus botones fueron desactivados. Revisa los logs del bot.",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.followup.send("✅ Drop publicado correctamente en este canal.", ephemeral=True)
 
 
 class TicketControlView(discord.ui.View):
@@ -4821,7 +4691,21 @@ async def on_command_error(interaction: discord.Interaction, error):
 
 @bot.tree.command(name="drop", description="Configura y publica un Drop en el canal de Drops")
 @app_commands.guild_only()
-async def create_drop_command(interaction: discord.Interaction):
+@app_commands.describe(
+    premio="Premio del Drop (máximo 100 caracteres)",
+    descripcion="Descripción del premio (máximo 1024 caracteres)",
+    duracion="Cuánto tiempo durará (ej. 10m, 30m, 1h)",
+    ganadores="Cantidad de ganadores (de 1 a 20)",
+    imagen="Adjunta una imagen del premio (opcional)",
+)
+async def create_drop_command(
+    interaction: discord.Interaction,
+    premio: str,
+    descripcion: str,
+    duracion: str,
+    ganadores: int,
+    imagen: Optional[discord.Attachment] = None,
+):
     if interaction.guild is None or not is_drop_channel(interaction.guild, interaction.channel_id):
         channel = get_drop_channel(interaction.guild) if interaction.guild else None
         allowed_channel = channel.mention if channel else f"#{config.DROP_CHANNEL_NAME}"
@@ -4838,9 +4722,98 @@ async def create_drop_command(interaction: discord.Interaction):
         )
         return
 
-    await interaction.response.send_modal(
-        DropCreationModal(interaction.guild.id, interaction.channel_id)
-    )
+    prize = premio.strip()
+    description = descripcion.strip()
+    if not prize or len(prize) > 100 or not description or len(description) > 1024:
+        await interaction.response.send_message(
+            "El premio debe tener entre 1 y 100 caracteres y la descripción entre 1 y 1024.",
+            ephemeral=True,
+        )
+        return
+
+    duration_seconds = parse_duration(duracion.strip())
+    if duration_seconds is None or not 60 <= duration_seconds <= 30 * 86400:
+        await interaction.response.send_message(
+            "La duración debe ser de al menos 1 minuto y como máximo 30 días "
+            "(por ejemplo: `10m`, `30m`, `1h` o `2d`).",
+            ephemeral=True,
+        )
+        return
+    if not 1 <= ganadores <= 20:
+        await interaction.response.send_message(
+            "La cantidad de ganadores debe estar entre 1 y 20.",
+            ephemeral=True,
+        )
+        return
+
+    if imagen is not None and (
+        not imagen.content_type or not imagen.content_type.startswith("image/")
+    ):
+        await interaction.response.send_message("El archivo adjunto debe ser una imagen.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    image_file = None
+    image_url = None
+    if imagen is not None:
+        try:
+            image_file = await imagen.to_file()
+            image_url = f"attachment://{image_file.filename}"
+        except discord.HTTPException as error:
+            logger.exception(f"No pude leer la imagen adjunta al Drop: {error}")
+            await interaction.followup.send("No pude procesar la imagen adjunta.", ephemeral=True)
+            return
+
+    channel = interaction.channel
+    drop = {
+        "message_id": None,
+        "guild_id": interaction.guild.id,
+        "channel_id": channel.id,
+        "prize": prize,
+        "description": description,
+        "image_url": image_url,
+        "winners_count": ganadores,
+        "participants": [],
+        "winner_ids": [],
+        "end_time": discord.utils.utcnow().timestamp() + duration_seconds,
+        "ended": False,
+        "result_published": False,
+    }
+
+    message_options = {
+        "embed": build_drop_embed(drop),
+        "view": DropView(),
+        "allowed_mentions": discord.AllowedMentions.none(),
+    }
+    if image_file is not None:
+        message_options["file"] = image_file
+
+    try:
+        message = await channel.send(**message_options)
+    except Exception as error:
+        logger.exception(f"No pude publicar el Drop en #{channel.name}: {error}")
+        await interaction.followup.send(
+            "No pude publicar el Drop. Verifica los permisos del bot y el tamaño de la imagen.",
+            ephemeral=True,
+        )
+        return
+
+    drop["message_id"] = message.id
+    try:
+        await create_drop_record(drop)
+    except Exception as error:
+        logger.exception(f"No pude guardar el Drop {message.id}: {error}")
+        try:
+            await message.edit(view=None)
+        except discord.HTTPException as edit_error:
+            logger.error(f"No pude desactivar el Drop sin registrar {message.id}: {edit_error}")
+        await interaction.followup.send(
+            "No pude guardar el Drop, así que sus botones fueron desactivados. Revisa los logs del bot.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.followup.send("✅ Drop publicado correctamente en este canal.", ephemeral=True)
 
 
 @bot.tree.command(name="sorteo_iniciar", description="Inicia un nuevo sorteo")
