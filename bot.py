@@ -18,10 +18,26 @@ import pytz
 import random
 
 def has_admin_role():
-    """Permite comandos administrativos únicamente al dueño del servidor."""
+    """Permite estos comandos al dueño o al rol coadministrador."""
     async def predicate(interaction: discord.Interaction):
-        return interaction.guild is not None and interaction.user.id == interaction.guild.owner_id
+        if interaction.guild is None:
+            return False
+        if interaction.user.id == interaction.guild.owner_id:
+            return True
+        role = get_co_admin_role(interaction.guild)
+        return role is not None and role in interaction.user.roles
     return app_commands.check(predicate)
+
+def has_admin_role_prefix():
+    """Permite comandos de prefijo al dueño o al rol coadministrador."""
+    async def predicate(ctx):
+        if ctx.guild is None:
+            return False
+        if ctx.author.id == ctx.guild.owner_id:
+            return True
+        role = get_co_admin_role(ctx.guild)
+        return role is not None and role in ctx.author.roles
+    return commands.check(predicate)
 
 def get_co_admin_role(guild):
     role_name = re.sub(r"[^a-z0-9]", "", config.CO_ADMIN_ROLE_NAME.casefold())
@@ -39,8 +55,6 @@ def has_co_admin_access():
             return False
         if interaction.user.id == interaction.guild.owner_id:
             return True
-        if interaction.user.guild_permissions.administrator:
-            return False
         role = get_co_admin_role(interaction.guild)
         return role is not None and role in interaction.user.roles
     return app_commands.check(predicate)
@@ -55,9 +69,12 @@ def has_voucher_permission():
         if interaction.user.id == interaction.guild.owner_id:
             return True
         
+        co_admin_role = get_co_admin_role(interaction.guild)
+        if co_admin_role is not None and co_admin_role in interaction.user.roles:
+            return True
+
         # Buscar roles permitidos
         allowed_role_names = {"vendedor", "vendedores", "administrador", "administradores", "admin", "admins", "fundador", "fundadores", "founder", "creador", "creator"}
-        co_admin_role = get_co_admin_role(interaction.guild)
         user_role_names = {
             re.sub(r"[^a-z0-9]", "", role.name.lower())
             for role in interaction.user.roles
@@ -113,22 +130,7 @@ class NexusCommandTree(app_commands.CommandTree):
             return True
 
         co_admin_role = get_co_admin_role(interaction.guild)
-        co_admin_commands = {
-            "banear",
-            "timeout",
-            "clear",
-            "clear_user",
-            "crear_canal",
-            "editar_canal",
-            "cerrar",
-        }
-        if (
-            co_admin_role is not None
-            and co_admin_role in interaction.user.roles
-            and not interaction.user.guild_permissions.administrator
-            and interaction.command is not None
-            and interaction.command.name in co_admin_commands
-        ):
+        if co_admin_role is not None and co_admin_role in interaction.user.roles:
             return True
 
         channel = interaction.channel
@@ -3479,7 +3481,7 @@ async def nexusfn(interaction: discord.Interaction):
     await interaction.followup.send(confirmation, ephemeral=True)
 
 @bot.command(name="embed")
-@commands.has_role(config.ADMIN_ROLE_ID)
+@has_admin_role_prefix()
 async def embed_cmd(ctx, titulo: str, *, resto: str):
     """Crea un embed personalizado. Uso: !embed "TITULO" descripcion url_banner"""
     partes = resto.rsplit(" ", 1)
@@ -3508,7 +3510,7 @@ async def embed_cmd(ctx, titulo: str, *, resto: str):
         pass
 
 @bot.command(name="dmall")
-@commands.has_role(config.ADMIN_ROLE_ID)
+@has_admin_role_prefix()
 async def dmall(ctx):
     """Envía un mensaje por DM a todos los miembros del servidor con el banner especificado."""
     embed = discord.Embed(
@@ -3690,7 +3692,9 @@ async def vouchdrop(
         await interaction.response.send_message("Este comando solo puede usarse en el servidor.", ephemeral=True)
         return
 
-    if resolve_drop_author_key(guild, interaction.user) is None:
+    co_admin_role = get_co_admin_role(guild)
+    is_co_admin = co_admin_role is not None and co_admin_role in interaction.user.roles
+    if resolve_drop_author_key(guild, interaction.user) is None and not is_co_admin:
         await interaction.response.send_message("❌ `/vouchdrop` es solo para Nexus y Noxy.", ephemeral=True)
         return
 
@@ -3865,13 +3869,6 @@ async def send_embed(
         )
         error_embed.set_footer(text="NexusStore © Todos los derechos reservados")
         await interaction.followup.send(error_embed, ephemeral=True)
-
-def has_admin_role_prefix():
-    """Restringe los comandos de prefijo al dueño del servidor."""
-    async def predicate(ctx):
-        return ctx.guild is not None and ctx.author.id == ctx.guild.owner_id
-    return commands.check(predicate)
-
 
 @bot.command(name="enviar_embed", help="Envía un embed con formato profesional y estilo NexusStore. Uso: !enviar_embed \"Título\" Descripción")
 @has_admin_role_prefix()

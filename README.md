@@ -20,10 +20,13 @@ registros, no modifica los datos.
 
 ## Rol Admin limitado
 
-El rol indicado por `CO_ADMIN_ROLE_NAME` puede leer y cerrar tickets, usar `/banear`,
-`/timeout`, `/clear`, `/clear_user`, `/crear_canal` y `/editar_canal`. La limpieza
+El rol indicado por `CO_ADMIN_ROLE_NAME` puede usar los comandos slash y comandos
+administrativos de prefijo del bot desde cualquier canal, incluido `/vouch`.
+`/drop` sigue limitado a `#drops` y `/cerrar` solo funciona en tickets. La limpieza
 por comando excluye los mensajes del dueño. Los comandos de canal solo crean canales
-de texto o editan nombre/tema; no borran canales ni cambian sus permisos.
+de texto o editan nombre/tema; no borran canales ni cambian sus permisos. Las
+restricciones propias de cada comando (por ejemplo, jerarquía de roles al moderar)
+se mantienen.
 
 No concedas a ese rol `Administrator`, `Manage Messages`, `Manage Channels`,
 `Manage Server` ni `Manage Roles`: esos permisos de Discord permitirían saltarse las
