@@ -38,7 +38,7 @@ El comando `/drop` abre un formulario para premio, descripción, URL opcional de
 imagen, duración y cantidad de ganadores. Solo el dueño o Staff autorizado puede
 crear o finalizar Drops. La participación está abierta a los miembros del servidor.
 
-Configura `DROP_CHANNEL_NAME = "drop"` o indica el ID en `DROP_CHANNEL_ID`. El
+Configura `DROP_CHANNEL_NAME = "drops"` o indica el ID en `DROP_CHANNEL_ID`. El
 comando y el envío del formulario se validan en ese canal; fuera de él, `/drop`
 responde con un aviso y no publica nada. La imagen se proporciona mediante una URL.
 La duración permitida es de 1 minuto a 30 días y acepta formatos como `10m`, `1h`

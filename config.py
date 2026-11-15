@@ -60,7 +60,7 @@ COMMANDS_CHANNEL_NAME = "🔧・comandos"
 
 # Nexus Drop
 DROP_CHANNEL_ID = None
-DROP_CHANNEL_NAME = "drop"
+DROP_CHANNEL_NAME = "drops"
 
 # Reputación (Nexus Reputation)
 REPUTATION_ENABLED = True
