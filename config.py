@@ -28,6 +28,7 @@ VOICE_CHANNEL_ID = None  # ID del canal de voz donde el bot estará conectado si
 # IDs de Roles (opcional)
 ADMIN_ROLE_ID = None  # Rol requerido para comandos de admin
 SUPPORT_ROLE_ID = None
+CO_ADMIN_ROLE_NAME = "Admin"
 AUTO_ROLE_ID = None  # Rol que se asigna automáticamente al entrar
 AUTO_ROLE_NAME = "MIEMBROS"  # Nombre del rol automático si no se configura el ID (ajustar según el nombre exacto del rol en tu servidor)
 MOD_LOG_CHANNEL_ID = None

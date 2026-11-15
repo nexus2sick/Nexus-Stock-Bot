@@ -23,6 +23,28 @@ def has_admin_role():
         return interaction.guild is not None and interaction.user.id == interaction.guild.owner_id
     return app_commands.check(predicate)
 
+def get_co_admin_role(guild):
+    role_name = re.sub(r"[^a-z0-9]", "", config.CO_ADMIN_ROLE_NAME.casefold())
+    return next(
+        (
+            role for role in guild.roles
+            if re.sub(r"[^a-z0-9]", "", role.name.casefold()) == role_name
+        ),
+        None,
+    )
+
+def has_co_admin_access():
+    async def predicate(interaction: discord.Interaction):
+        if interaction.guild is None:
+            return False
+        if interaction.user.id == interaction.guild.owner_id:
+            return True
+        if interaction.user.guild_permissions.administrator:
+            return False
+        role = get_co_admin_role(interaction.guild)
+        return role is not None and role in interaction.user.roles
+    return app_commands.check(predicate)
+
 def has_voucher_permission():
     """Permite comandos de vouch a administradores, fundadores y owners."""
     async def predicate(interaction: discord.Interaction):
@@ -35,9 +57,11 @@ def has_voucher_permission():
         
         # Buscar roles permitidos
         allowed_role_names = {"vendedor", "vendedores", "administrador", "administradores", "admin", "admins", "fundador", "fundadores", "founder", "creador", "creator"}
+        co_admin_role = get_co_admin_role(interaction.guild)
         user_role_names = {
             re.sub(r"[^a-z0-9]", "", role.name.lower())
             for role in interaction.user.roles
+            if role != co_admin_role
         }
         
         # Verificar si tiene algún rol permitido
@@ -75,6 +99,25 @@ class NexusCommandTree(app_commands.CommandTree):
 
         # El dueño del servidor puede usar comandos en cualquier canal
         if interaction.user.id == interaction.guild.owner_id:
+            return True
+
+        co_admin_role = get_co_admin_role(interaction.guild)
+        co_admin_commands = {
+            "banear",
+            "timeout",
+            "clear",
+            "clear_user",
+            "crear_canal",
+            "editar_canal",
+            "cerrar",
+        }
+        if (
+            co_admin_role is not None
+            and co_admin_role in interaction.user.roles
+            and not interaction.user.guild_permissions.administrator
+            and interaction.command is not None
+            and interaction.command.name in co_admin_commands
+        ):
             return True
 
         channel = interaction.channel
@@ -830,6 +873,13 @@ async def _create_ticket_channel(interaction: discord.Interaction, category_key:
         support_role = guild.get_role(config.SUPPORT_ROLE_ID)
         if support_role:
             overwrites[support_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+    co_admin_role = get_co_admin_role(guild)
+    if co_admin_role:
+        overwrites[co_admin_role] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+        )
 
     prefix_map = {
         "comprar_cuenta": "Comprar",
@@ -1047,6 +1097,36 @@ class TicketOpenView(discord.ui.View):
         super().__init__(timeout=None)
         self.add_item(TicketPanelSelect())
 
+async def sync_co_admin_ticket_access(guild):
+    role = get_co_admin_role(guild)
+    category = discord.utils.get(guild.categories, name="TICKETS")
+    if not role or not category:
+        return
+
+    for channel in category.text_channels:
+        current = channel.overwrites_for(role)
+        if (
+            current.view_channel is True
+            and current.send_messages is True
+            and current.read_message_history is True
+        ):
+            continue
+        overwrites = channel.overwrites
+        overwrites[role] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+        )
+        try:
+            await channel.edit(
+                overwrites=overwrites,
+                reason="Acceso al rol Admin limitado",
+            )
+        except discord.Forbidden:
+            logger.error(f"No pude dar acceso al rol Admin al ticket #{channel.name}")
+        except discord.HTTPException as error:
+            logger.error(f"Error actualizando permisos de #{channel.name}: {error}")
+
 @bot.event
 async def on_ready():
     print(f'Bot conectado como {bot.user}')
@@ -1058,6 +1138,7 @@ async def on_ready():
         bot.tree.clear_commands(guild=guild)
         await bot.tree.sync(guild=guild)
         print(f"Comandos duplicados eliminados en: {guild.name}")
+        await sync_co_admin_ticket_access(guild)
     
     # Conectar a canal de voz si está configurado
     if config.VOICE_CHANNEL_ID is not None:
@@ -1698,7 +1779,14 @@ def is_unauthorized_promotion(content: str) -> bool:
 async def moderate_message(message):
     if not config.MODERATION_ENABLED or not message.guild:
         return False
-    if message.author.guild_permissions.manage_messages or message.author.guild_permissions.administrator:
+    if message.author.id == message.guild.owner_id:
+        return False
+    co_admin_role = get_co_admin_role(message.guild)
+    is_co_admin = co_admin_role is not None and co_admin_role in message.author.roles
+    if not is_co_admin and (
+        message.author.guild_permissions.manage_messages
+        or message.author.guild_permissions.administrator
+    ):
         return False
     content = message.content.lower()
     matched_bad_word = next((word for word in config.PROHIBITED_WORDS if word.lower() in content), None)
@@ -1918,7 +2006,12 @@ async def on_message(message):
     if message.channel.name.startswith(("ticket-", "🎫")):
         staff_role = message.guild.get_role(config.SUPPORT_ROLE_ID) if config.SUPPORT_ROLE_ID else None
         admin_role = message.guild.get_role(config.ADMIN_ROLE_ID) if config.ADMIN_ROLE_ID else None
-        is_staff = (staff_role and staff_role in message.author.roles) or (admin_role and admin_role in message.author.roles)
+        co_admin_role = get_co_admin_role(message.guild)
+        is_staff = (
+            (staff_role and staff_role in message.author.roles)
+            or (admin_role and admin_role in message.author.roles)
+            or (co_admin_role and co_admin_role in message.author.roles)
+        )
         if is_staff:
             staff_embed = discord.Embed(
                 title="**¡NUEVA RESPUESTA DEL STAFF!**",
@@ -2493,7 +2586,7 @@ async def publicar_reglas(interaction: discord.Interaction):
     await interaction.response.send_message("Reglas publicadas correctamente.", ephemeral=True)
 
 @bot.tree.command(name="banear", description="Banea permanentemente a un usuario del servidor")
-@has_admin_role()
+@has_co_admin_access()
 @app_commands.describe(usuario="Usuario que será baneado", razon="Motivo del baneo")
 async def banear(interaction: discord.Interaction, usuario: discord.Member, razon: str):
     """Banea a un miembro y prepara el aviso en el canal de despedidas."""
@@ -2503,6 +2596,18 @@ async def banear(interaction: discord.Interaction, usuario: discord.Member, razo
 
     if usuario == interaction.guild.owner:
         await interaction.response.send_message("No puedes banear al dueño del servidor.", ephemeral=True)
+        return
+
+    co_admin_role = get_co_admin_role(interaction.guild)
+    if (
+        interaction.user.id != interaction.guild.owner_id
+        and co_admin_role is not None
+        and co_admin_role in usuario.roles
+    ):
+        await interaction.response.send_message(
+            "Solo el dueño del servidor puede banear a un miembro del rol Admin.",
+            ephemeral=True,
+        )
         return
 
     bot_member = interaction.guild.me
@@ -2533,7 +2638,7 @@ async def banear(interaction: discord.Interaction, usuario: discord.Member, razo
     )
 
 @bot.tree.command(name="timeout", description="Silencia temporalmente a un usuario")
-@has_admin_role()
+@has_co_admin_access()
 @app_commands.describe(
     usuario="Usuario que recibirá el timeout",
     duracion="Duración del timeout (ej. 10m, 2h, 1d)",
@@ -2552,6 +2657,18 @@ async def timeout_cmd(
 
     if usuario == interaction.guild.owner:
         await interaction.response.send_message("No puedes ponerle timeout al dueño del servidor.", ephemeral=True)
+        return
+
+    co_admin_role = get_co_admin_role(interaction.guild)
+    if (
+        interaction.user.id != interaction.guild.owner_id
+        and co_admin_role is not None
+        and co_admin_role in usuario.roles
+    ):
+        await interaction.response.send_message(
+            "Solo el dueño del servidor puede aplicar timeout a un miembro del rol Admin.",
+            ephemeral=True,
+        )
         return
 
     bot_member = interaction.guild.me
@@ -2589,12 +2706,168 @@ async def timeout_cmd(
         ephemeral=True
     )
 
+def is_protected_channel_for_co_admin(channel):
+    if channel.category and channel.category.name.upper() == "TICKETS":
+        return True
+    if channel.topic and "ticket_owner_id:" in channel.topic:
+        return True
+
+    protected_names = {
+        value
+        for name, value in vars(config).items()
+        if name.endswith("_CHANNEL_NAME") and isinstance(value, str) and value
+    }
+    protected_ids = {
+        value
+        for name, value in vars(config).items()
+        if name.endswith("_CHANNEL_ID") and isinstance(value, int)
+    }
+    protected_names.update(
+        channel_config["name"]
+        for channel_config in config.VOUCHES_CHANNELS.values()
+        if channel_config.get("name")
+    )
+    protected_ids.update(
+        channel_config["id"]
+        for channel_config in config.VOUCHES_CHANNELS.values()
+        if isinstance(channel_config.get("id"), int)
+    )
+    return channel.name in protected_names or channel.id in protected_ids
+
+@bot.tree.command(name="crear_canal", description="Crea un canal de texto")
+@app_commands.describe(nombre="Nombre del nuevo canal de texto")
+@has_co_admin_access()
+async def crear_canal(interaction: discord.Interaction, nombre: str):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "Este comando solo puede usarse en el servidor.",
+            ephemeral=True,
+        )
+        return
+    if not nombre.strip() or len(nombre) > 100:
+        await interaction.response.send_message(
+            "El nombre debe tener entre 1 y 100 caracteres.",
+            ephemeral=True,
+        )
+        return
+
+    bot_member = interaction.guild.me
+    if not bot_member:
+        await interaction.response.send_message(
+            "No pude verificar los permisos del bot.",
+            ephemeral=True,
+        )
+        return
+    if not bot_member.guild_permissions.manage_channels:
+        await interaction.response.send_message(
+            "El bot necesita el permiso Gestionar canales para crear canales.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        channel = await interaction.guild.create_text_channel(
+            name=nombre.strip(),
+            reason=f"Canal creado por {interaction.user}",
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "Discord no permitió crear el canal. Revisa el permiso del bot.",
+            ephemeral=True,
+        )
+        return
+    except discord.HTTPException as error:
+        await interaction.response.send_message(
+            f"No se pudo crear el canal: {error}",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(
+        f"Canal creado: {channel.mention}",
+        ephemeral=True,
+    )
+
+@bot.tree.command(name="editar_canal", description="Cambia el nombre o tema de un canal de texto")
+@app_commands.describe(
+    canal="Canal que quieres editar",
+    nombre="Nuevo nombre (opcional)",
+    tema="Nuevo tema (opcional)",
+)
+@has_co_admin_access()
+async def editar_canal(
+    interaction: discord.Interaction,
+    canal: discord.TextChannel,
+    nombre: Optional[str] = None,
+    tema: Optional[str] = None,
+):
+    if nombre is None and tema is None:
+        await interaction.response.send_message(
+            "Indica un nombre o un tema nuevo.",
+            ephemeral=True,
+        )
+        return
+    if nombre is not None and (not nombre.strip() or len(nombre) > 100):
+        await interaction.response.send_message(
+            "El nombre debe tener entre 1 y 100 caracteres.",
+            ephemeral=True,
+        )
+        return
+    if tema is not None and len(tema) > 1024:
+        await interaction.response.send_message(
+            "El tema no puede superar los 1024 caracteres.",
+            ephemeral=True,
+        )
+        return
+    if (
+        interaction.user.id != interaction.guild.owner_id
+        and is_protected_channel_for_co_admin(canal)
+    ):
+        await interaction.response.send_message(
+            "Ese canal está protegido porque lo usa el bot o pertenece a tickets.",
+            ephemeral=True,
+        )
+        return
+    bot_member = interaction.guild.me
+    if not bot_member or not bot_member.guild_permissions.manage_channels:
+        await interaction.response.send_message(
+            "El bot necesita el permiso Gestionar canales para editar canales.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        await canal.edit(
+            name=nombre.strip() if nombre is not None else canal.name,
+            topic=tema if tema is not None else canal.topic,
+            reason=f"Canal editado por {interaction.user}",
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "Discord no permitió editar el canal. Revisa el permiso del bot.",
+            ephemeral=True,
+        )
+        return
+    except discord.HTTPException as error:
+        await interaction.response.send_message(
+            f"No se pudo editar el canal: {error}",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(
+        f"Canal actualizado: {canal.mention}",
+        ephemeral=True,
+    )
+
 @bot.tree.command(name="ath", description="Muestra la información oficial de pago por ATH Móvil")
 async def ath_pago(interaction: discord.Interaction):
     allowed_role_names = {"admin", "admins", "administrador", "administradores", "staff", "founder", "founders", "fundador", "fundadores", "creator", "creators", "creador", "creadores"}
+    co_admin_role = get_co_admin_role(interaction.guild) if interaction.guild else None
     normalized_roles = {
         re.sub(r"[^a-z0-9]", "", role.name.casefold())
         for role in getattr(interaction.user, "roles", [])
+        if role != co_admin_role
     }
     is_allowed = (
         interaction.guild is not None
@@ -3391,7 +3664,7 @@ async def voice_status(interaction: discord.Interaction):
 @app_commands.describe(
     cantidad="Número de mensajes a eliminar (1-100), o 'todos' para eliminar todos"
 )
-@has_admin_role()
+@has_co_admin_access()
 async def clear_messages(interaction: discord.Interaction, cantidad: str):
     """Elimina mensajes del canal con opción de cantidad o todos"""
     try:
@@ -3413,22 +3686,14 @@ async def clear_messages(interaction: discord.Interaction, cantidad: str):
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
         
-        # Verificar permisos del usuario
-        if not interaction.channel.permissions_for(interaction.user).manage_messages:
-            embed = discord.Embed(
-                title="Sin Permisos",
-                description="No tienes permisos para usar este comando.",
-                color=config.COLOR_EMBED
-            )
-            embed.set_footer(text="NexusStore © Todos los derechos reservados")
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
-        
         # Procesar el parámetro cantidad
         if cantidad.lower() == 'todos':
             # Eliminar todos los mensajes posibles
             try:
-                deleted = await interaction.channel.purge(limit=100, check=lambda m: not m.pinned)
+                deleted = await interaction.channel.purge(
+                    limit=100,
+                    check=lambda m: not m.pinned and m.author.id != interaction.guild.owner_id,
+                )
                 count = len(deleted)
                 
                 embed = discord.Embed(
@@ -3467,7 +3732,10 @@ async def clear_messages(interaction: discord.Interaction, cantidad: str):
                     raise ValueError
                 
                 # Eliminar la cantidad especificada
-                deleted = await interaction.channel.purge(limit=num, check=lambda m: not m.pinned)
+                deleted = await interaction.channel.purge(
+                    limit=num,
+                    check=lambda m: not m.pinned and m.author.id != interaction.guild.owner_id,
+                )
                 count = len(deleted)
                 
                 embed = discord.Embed(
@@ -3527,7 +3795,7 @@ async def clear_messages(interaction: discord.Interaction, cantidad: str):
     usuario="Usuario cuyos mensajes quieres eliminar",
     cantidad="Número de mensajes a eliminar (1-100), o 'todos' para eliminar todos"
 )
-@has_admin_role()
+@has_co_admin_access()
 async def clear_user_messages(interaction: discord.Interaction, usuario: discord.Member, cantidad: str):
     """Elimina mensajes de un usuario específico"""
     await interaction.response.defer(ephemeral=True)
@@ -3544,17 +3812,13 @@ async def clear_user_messages(interaction: discord.Interaction, usuario: discord
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
         
-        # Verificar permisos del usuario
-        if not interaction.channel.permissions_for(interaction.user).manage_messages:
-            embed = discord.Embed(
-                title="Sin Permisos",
-                description="No tienes permisos para usar este comando.",
-                color=config.COLOR_EMBED
+        if usuario.id == interaction.guild.owner_id:
+            await interaction.followup.send(
+                "No puedes borrar mensajes del dueño del servidor.",
+                ephemeral=True,
             )
-            embed.set_footer(text="NexusStore © Todos los derechos reservados")
-            await interaction.followup.send(embed=embed, ephemeral=True)
             return
-        
+
         # No permitir eliminar mensajes del bot o de administradores (protección)
         if usuario.bot:
             embed = discord.Embed(

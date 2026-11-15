@@ -17,3 +17,17 @@ el bot. Luego, como dueño del servidor, ejecuta `/recuperar_reputacion`. El bot
 los mensajes del canal de reputación en orden; necesita permiso para ver el canal y
 leer su historial. Los mensajes de compra deben seguir existiendo. Si no encuentra
 registros, no modifica los datos.
+
+## Rol Admin limitado
+
+El rol indicado por `CO_ADMIN_ROLE_NAME` puede leer y cerrar tickets, usar `/banear`,
+`/timeout`, `/clear`, `/clear_user`, `/crear_canal` y `/editar_canal`. La limpieza
+por comando excluye los mensajes del dueño. Los comandos de canal solo crean canales
+de texto o editan nombre/tema; no borran canales ni cambian sus permisos.
+
+No concedas a ese rol `Administrator`, `Manage Messages`, `Manage Channels`,
+`Manage Server` ni `Manage Roles`: esos permisos de Discord permitirían saltarse las
+protecciones del bot. El bot necesita `Manage Messages`, `Manage Channels`,
+`Ban Members` y `Moderate Members`, y su rol debe estar por encima del rol Admin y
+de los miembros a los que moderará. El bot agrega el rol Admin a los tickets
+existentes y nuevos al conectarse.
