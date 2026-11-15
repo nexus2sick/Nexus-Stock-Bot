@@ -16,6 +16,7 @@ import json
 from datetime import datetime, timedelta
 import pytz
 import random
+from urllib.parse import urlsplit
 
 def has_admin_role():
     """Permite comandos administrativos únicamente al dueño del servidor."""
@@ -94,6 +95,17 @@ class ChannelRestrictionError(app_commands.CheckFailure):
 
 class NexusCommandTree(app_commands.CommandTree):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.command is not None and interaction.command.name == "drop":
+            if interaction.guild is None or not is_drop_channel(interaction.guild, interaction.channel_id):
+                drop_channel = (
+                    get_drop_channel(interaction.guild)
+                    if interaction.guild is not None
+                    else None
+                )
+                channel_name = drop_channel.mention if drop_channel else f"#{config.DROP_CHANNEL_NAME}"
+                raise ChannelRestrictionError(f"El comando `/drop` solo puede usarse en {channel_name}.")
+            return True
+
         if not config.COMMANDS_RESTRICTION_ENABLED or interaction.guild is None:
             return True
 
@@ -212,6 +224,7 @@ class NexusStoreBot(commands.Bot):
 
     async def setup_hook(self):
         await initialize_reputation_store()
+        await initialize_drop_store()
 
         app = web.Application()
 
@@ -265,6 +278,340 @@ class NexusStoreBot(commands.Bot):
 bot = NexusStoreBot()
 
 GIVEAWAYS_FILE = "giveaways.json"
+DROP_FILE = os.getenv("DROPS_FILE", "drops.json")
+DROP_COLOR = 0x0C3B2E
+drop_store_lock = asyncio.Lock()
+drop_publish_lock = asyncio.Lock()
+
+
+def get_drop_channel(guild):
+    return get_configured_channel(guild, config.DROP_CHANNEL_ID, config.DROP_CHANNEL_NAME)
+
+
+def is_drop_channel(guild, channel_id):
+    channel = get_drop_channel(guild)
+    return channel is not None and channel.id == channel_id
+
+
+def can_manage_drop(member):
+    guild = member.guild
+    if member.id == guild.owner_id or member.guild_permissions.administrator:
+        return True
+
+    authorized_role_ids = {config.ADMIN_ROLE_ID, config.SUPPORT_ROLE_ID}
+    if any(role.id in authorized_role_ids for role in member.roles if role.id in authorized_role_ids):
+        return True
+
+    co_admin_role = get_co_admin_role(guild)
+    if co_admin_role is not None and co_admin_role in member.roles:
+        return True
+
+    allowed_role_names = {
+        "admin", "administrator", "staff", "moderator",
+        "founder", "founders", "creator", "creators", "owner",
+    }
+    return any(
+        re.sub(r"[^a-z0-9]", "", role.name.casefold()) in allowed_role_names
+        for role in member.roles
+    )
+
+
+async def initialize_drop_store():
+    if reputation_pool is None:
+        return
+
+    async with reputation_pool.acquire() as connection:
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS nexus_drops (
+                message_id BIGINT PRIMARY KEY,
+                guild_id BIGINT NOT NULL,
+                channel_id BIGINT NOT NULL,
+                prize TEXT NOT NULL,
+                description TEXT NOT NULL,
+                image_url TEXT,
+                winners_count INTEGER NOT NULL,
+                participants JSONB NOT NULL DEFAULT '[]'::jsonb,
+                winner_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                end_time DOUBLE PRECISION NOT NULL,
+                ended BOOLEAN NOT NULL DEFAULT FALSE,
+                result_published BOOLEAN NOT NULL DEFAULT FALSE
+            )
+            """
+        )
+        await connection.execute(
+            """
+            ALTER TABLE nexus_drops
+            ADD COLUMN IF NOT EXISTS result_published BOOLEAN NOT NULL DEFAULT FALSE
+            """
+        )
+
+
+def _read_drop_file():
+    if not os.path.exists(DROP_FILE):
+        return []
+    with open(DROP_FILE, "r", encoding="utf-8") as file:
+        records = json.load(file)
+    if not isinstance(records, list):
+        raise ValueError(f"{DROP_FILE} debe contener una lista JSON")
+    return records
+
+
+def _write_drop_file(records):
+    directory = os.path.dirname(os.path.abspath(DROP_FILE))
+    os.makedirs(directory, exist_ok=True)
+    temporary_file = f"{DROP_FILE}.tmp"
+    with open(temporary_file, "w", encoding="utf-8") as file:
+        json.dump(records, file, indent=4, ensure_ascii=False)
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(temporary_file, DROP_FILE)
+
+
+def _drop_from_row(row):
+    return {
+        "message_id": row["message_id"],
+        "guild_id": row["guild_id"],
+        "channel_id": row["channel_id"],
+        "prize": row["prize"],
+        "description": row["description"],
+        "image_url": row["image_url"],
+        "winners_count": row["winners_count"],
+        "participants": json.loads(row["participants"]),
+        "winner_ids": json.loads(row["winner_ids"]),
+        "end_time": row["end_time"],
+        "ended": row["ended"],
+        "result_published": row["result_published"],
+    }
+
+
+async def create_drop_record(drop):
+    if reputation_pool is not None:
+        async with reputation_pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO nexus_drops (
+                    message_id, guild_id, channel_id, prize, description, image_url,
+                    winners_count, participants, winner_ids, end_time, ended
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, FALSE)
+                """,
+                drop["message_id"],
+                drop["guild_id"],
+                drop["channel_id"],
+                drop["prize"],
+                drop["description"],
+                drop["image_url"],
+                drop["winners_count"],
+                json.dumps(drop["participants"]),
+                json.dumps(drop["winner_ids"]),
+                drop["end_time"],
+            )
+        return
+
+    async with drop_store_lock:
+        records = _read_drop_file()
+        records.append(drop)
+        _write_drop_file(records)
+
+
+async def list_active_drops():
+    if reputation_pool is not None:
+        async with reputation_pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT message_id, guild_id, channel_id, prize, description, image_url,
+                       winners_count, participants::text AS participants,
+                       winner_ids::text AS winner_ids, end_time, ended, result_published
+                FROM nexus_drops
+                WHERE ended = FALSE
+                """
+            )
+        return [_drop_from_row(row) for row in rows]
+
+    async with drop_store_lock:
+        return [drop for drop in _read_drop_file() if not drop.get("ended", False)]
+
+
+async def list_pending_drop_results():
+    if reputation_pool is not None:
+        async with reputation_pool.acquire() as connection:
+            rows = await connection.fetch(
+                """
+                SELECT message_id, guild_id, channel_id, prize, description, image_url,
+                       winners_count, participants::text AS participants,
+                       winner_ids::text AS winner_ids, end_time, ended, result_published
+                FROM nexus_drops
+                WHERE ended = TRUE AND result_published = FALSE
+                """
+            )
+        return [_drop_from_row(row) for row in rows]
+
+    async with drop_store_lock:
+        return [
+            drop for drop in _read_drop_file()
+            if drop.get("ended", False) and not drop.get("result_published", False)
+        ]
+
+
+async def mark_drop_result_published(message_id):
+    if reputation_pool is not None:
+        async with reputation_pool.acquire() as connection:
+            await connection.execute(
+                "UPDATE nexus_drops SET result_published = TRUE WHERE message_id = $1",
+                message_id,
+            )
+        return
+
+    async with drop_store_lock:
+        records = _read_drop_file()
+        drop = next((item for item in records if item["message_id"] == message_id), None)
+        if drop is not None:
+            drop["result_published"] = True
+            _write_drop_file(records)
+
+
+async def add_drop_participant(message_id, user_id):
+    if reputation_pool is not None:
+        async with reputation_pool.acquire() as connection:
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    """
+                    SELECT message_id, guild_id, channel_id, prize, description, image_url,
+                           winners_count, participants::text AS participants,
+                           winner_ids::text AS winner_ids, end_time, ended, result_published
+                    FROM nexus_drops
+                    WHERE message_id = $1
+                    FOR UPDATE
+                    """,
+                    message_id,
+                )
+                if row is None:
+                    return "missing", None
+                drop = _drop_from_row(row)
+                if drop["ended"] or drop["end_time"] <= discord.utils.utcnow().timestamp():
+                    return "ended", drop
+                user_key = str(user_id)
+                if user_key in drop["participants"]:
+                    return "already_joined", drop
+                drop["participants"].append(user_key)
+                await connection.execute(
+                    "UPDATE nexus_drops SET participants = $2::jsonb WHERE message_id = $1",
+                    message_id,
+                    json.dumps(drop["participants"]),
+                )
+                return "joined", drop
+
+    async with drop_store_lock:
+        records = _read_drop_file()
+        drop = next((item for item in records if item["message_id"] == message_id), None)
+        if drop is None:
+            return "missing", None
+        if drop.get("ended") or drop["end_time"] <= discord.utils.utcnow().timestamp():
+            return "ended", drop
+        user_key = str(user_id)
+        if user_key in drop["participants"]:
+            return "already_joined", drop
+        drop["participants"].append(user_key)
+        _write_drop_file(records)
+        return "joined", drop
+
+
+async def finish_drop_record(message_id):
+    if reputation_pool is not None:
+        async with reputation_pool.acquire() as connection:
+            async with connection.transaction():
+                row = await connection.fetchrow(
+                    """
+                    SELECT message_id, guild_id, channel_id, prize, description, image_url,
+                           winners_count, participants::text AS participants,
+                           winner_ids::text AS winner_ids, end_time, ended, result_published
+                    FROM nexus_drops
+                    WHERE message_id = $1
+                    FOR UPDATE
+                    """,
+                    message_id,
+                )
+                if row is None:
+                    return "missing", None
+                drop = _drop_from_row(row)
+                if drop["ended"]:
+                    return "ended", drop
+                participant_ids = drop["participants"]
+                winners_count = min(len(participant_ids), drop["winners_count"])
+                drop["winner_ids"] = random.sample(participant_ids, winners_count) if winners_count else []
+                drop["ended"] = True
+                await connection.execute(
+                    """
+                    UPDATE nexus_drops
+                    SET winner_ids = $2::jsonb, ended = TRUE
+                    WHERE message_id = $1
+                    """,
+                    message_id,
+                    json.dumps(drop["winner_ids"]),
+                )
+                return "finished", drop
+
+    async with drop_store_lock:
+        records = _read_drop_file()
+        drop = next((item for item in records if item["message_id"] == message_id), None)
+        if drop is None:
+            return "missing", None
+        if drop.get("ended"):
+            return "ended", drop
+        participant_ids = drop["participants"]
+        winners_count = min(len(participant_ids), drop["winners_count"])
+        drop["winner_ids"] = random.sample(participant_ids, winners_count) if winners_count else []
+        drop["ended"] = True
+        _write_drop_file(records)
+        return "finished", drop
+
+
+def build_drop_embed(drop):
+    is_ended = drop["ended"]
+    status = "🔒 **FINALIZADO**" if is_ended else "🟢 **ACTIVO**"
+    description = f"{status}\n\n**¡NUEVO DROP DISPONIBLE!**\n\n{drop['description']}"
+    embed = discord.Embed(title="🎁 NEXUS DROP", description=description, color=DROP_COLOR)
+    embed.add_field(name="🎁 Premio", value=drop["prize"], inline=True)
+    embed.add_field(name="🏆 Ganadores", value=str(drop["winners_count"]), inline=True)
+    embed.add_field(
+        name="⏳ Finaliza en",
+        value="Drop finalizado" if is_ended else f"<t:{int(drop['end_time'])}:R>",
+        inline=True,
+    )
+    embed.add_field(name="👥 Participantes", value=str(len(drop["participants"])), inline=True)
+    if is_ended:
+        winners = ", ".join(f"<@{user_id}>" for user_id in drop["winner_ids"]) or "Ninguno"
+        embed.add_field(name="🎉 Resultado", value=winners, inline=False)
+    if drop["image_url"]:
+        embed.set_image(url=drop["image_url"])
+    embed.set_footer(text="NEXUS STOCK • OFFICIAL DROP")
+    embed.timestamp = discord.utils.utcnow()
+    return embed
+
+
+async def publish_drop_result(drop):
+    async with drop_publish_lock:
+        pending = await list_pending_drop_results()
+        drop = next((item for item in pending if item["message_id"] == drop["message_id"]), None)
+        if drop is None:
+            return
+
+        channel = bot.get_channel(drop["channel_id"])
+        if channel is None:
+            channel = await bot.fetch_channel(drop["channel_id"])
+        message = await channel.fetch_message(drop["message_id"])
+        await message.edit(embed=build_drop_embed(drop), view=None)
+
+        if drop["winner_ids"]:
+            winners = ", ".join(f"<@{user_id}>" for user_id in drop["winner_ids"])
+            content = f"🎉 ¡Felicidades {winners}! Ganaste **{drop['prize']}**."
+            allowed_mentions = discord.AllowedMentions(users=True, roles=False, everyone=False)
+        else:
+            content = f"El Drop de **{drop['prize']}** terminó sin participantes."
+            allowed_mentions = discord.AllowedMentions.none()
+        await channel.send(content, allowed_mentions=allowed_mentions)
+        await mark_drop_result_published(drop["message_id"])
 
 async def get_next_vouch_number(channel) -> int:
     """Guarda el contador de vouches en el topic del canal para que sobreviva a reinicios de Render."""
@@ -749,9 +1096,226 @@ async def check_giveaways_loop():
             for giveaway in giveaways:
                 if not giveaway.get("ended", False) and current_time >= giveaway["end_time"]:
                     await end_giveaway(giveaway["message_id"])
+            drops = await list_active_drops()
+            for drop in drops:
+                if current_time >= drop["end_time"]:
+                    await finish_drop_record(drop["message_id"])
+            for drop in await list_pending_drop_results():
+                try:
+                    await publish_drop_result(drop)
+                except Exception as error:
+                    logger.exception(f"No pude publicar el resultado del Drop {drop['message_id']}: {error}")
         except Exception as e:
             logger.error(f"Error en el bucle de sorteos: {e}")
         await asyncio.sleep(10)
+
+
+class DropView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="PARTICIPAR",
+        style=discord.ButtonStyle.success,
+        emoji="🎉",
+        custom_id="nexus_drop_participate",
+    )
+    async def participate(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            status, drop = await add_drop_participant(interaction.message.id, interaction.user.id)
+            if status == "missing":
+                await interaction.followup.send("Este Drop ya no está registrado.", ephemeral=True)
+                return
+            if status == "ended":
+                await interaction.followup.send("Este Drop ya finalizó.", ephemeral=True)
+                if not drop["ended"]:
+                    finish_status, finished_drop = await finish_drop_record(interaction.message.id)
+                    if finish_status == "finished":
+                        await publish_drop_result(finished_drop)
+                return
+            if status == "already_joined":
+                await interaction.followup.send("Ya estás participando en este Drop.", ephemeral=True)
+                return
+
+            await interaction.message.edit(embed=build_drop_embed(drop), view=self)
+            await interaction.followup.send("¡Ya estás participando en el Drop!", ephemeral=True)
+        except Exception as error:
+            logger.exception(f"Error registrando participante en Drop {interaction.message.id}: {error}")
+            await interaction.followup.send(
+                "No pude registrar tu participación. Inténtalo de nuevo en un momento.",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(
+        label="FINALIZAR",
+        style=discord.ButtonStyle.secondary,
+        emoji="🔒",
+        custom_id="nexus_drop_finish",
+    )
+    async def finish(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None or not can_manage_drop(interaction.user):
+            await interaction.response.send_message(
+                "❌ Solo el dueño o el Staff autorizado puede finalizar este Drop.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            status, drop = await finish_drop_record(interaction.message.id)
+            if status == "missing":
+                await interaction.followup.send("Este Drop ya no está registrado.", ephemeral=True)
+                return
+            if status == "ended":
+                await interaction.followup.send("Este Drop ya había finalizado.", ephemeral=True)
+                return
+            await publish_drop_result(drop)
+            await interaction.followup.send("✅ Drop finalizado.", ephemeral=True)
+        except Exception as error:
+            logger.exception(f"Error finalizando Drop {interaction.message.id}: {error}")
+            await interaction.followup.send(
+                "El Drop no pudo finalizarse correctamente. Revisa los logs del bot.",
+                ephemeral=True,
+            )
+
+
+class DropCreationModal(discord.ui.Modal, title="Configurar Nexus Drop"):
+    prize = discord.ui.TextInput(label="Premio", max_length=100, placeholder="Cuenta de Fortnite")
+    description = discord.ui.TextInput(
+        label="Descripción",
+        style=discord.TextStyle.paragraph,
+        max_length=1024,
+        placeholder="Información del premio",
+    )
+    image_url = discord.ui.TextInput(
+        label="Imagen (URL opcional)",
+        required=False,
+        max_length=1000,
+        placeholder="https://.../imagen.png",
+    )
+    duration = discord.ui.TextInput(
+        label="Duración",
+        max_length=10,
+        placeholder="10m, 30m, 1h",
+    )
+    winners_count = discord.ui.TextInput(
+        label="Cantidad de ganadores",
+        max_length=2,
+        placeholder="1",
+    )
+
+    def __init__(self, guild_id: int, channel_id: int):
+        super().__init__()
+        self.guild_id = guild_id
+        self.channel_id = channel_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if (
+            interaction.guild is None
+            or interaction.guild.id != self.guild_id
+            or interaction.channel_id != self.channel_id
+            or not is_drop_channel(interaction.guild, interaction.channel_id)
+        ):
+            await interaction.response.send_message(
+                f"Este formulario solo se puede enviar en #{config.DROP_CHANNEL_NAME}.",
+                ephemeral=True,
+            )
+            return
+        if not can_manage_drop(interaction.user):
+            await interaction.response.send_message(
+                "❌ Solo el dueño o el Staff autorizado puede crear un Drop.",
+                ephemeral=True,
+            )
+            return
+
+        prize = self.prize.value.strip()
+        description = self.description.value.strip()
+        if not prize or not description:
+            await interaction.response.send_message(
+                "El premio y la descripción no pueden quedar vacíos.",
+                ephemeral=True,
+            )
+            return
+
+        duration_seconds = parse_duration(self.duration.value.strip())
+        if duration_seconds is None or not 60 <= duration_seconds <= 30 * 86400:
+            await interaction.response.send_message(
+                "La duración debe ser de al menos 1 minuto y como máximo 30 días "
+                "(por ejemplo: `10m`, `30m`, `1h` o `2d`).",
+                ephemeral=True,
+            )
+            return
+        try:
+            winners_count = int(self.winners_count.value.strip())
+        except ValueError:
+            winners_count = 0
+        if not 1 <= winners_count <= 20:
+            await interaction.response.send_message(
+                "La cantidad de ganadores debe estar entre 1 y 20.",
+                ephemeral=True,
+            )
+            return
+
+        image_url = self.image_url.value.strip()
+        if image_url:
+            parsed_url = urlsplit(image_url)
+            if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+                await interaction.response.send_message(
+                    "La imagen debe ser una URL válida que empiece con `http://` o `https://`.",
+                    ephemeral=True,
+                )
+                return
+
+        channel = interaction.channel
+        end_time = discord.utils.utcnow().timestamp() + duration_seconds
+        drop = {
+            "message_id": None,
+            "guild_id": interaction.guild.id,
+            "channel_id": channel.id,
+            "prize": prize,
+            "description": description,
+            "image_url": image_url or None,
+            "winners_count": winners_count,
+            "participants": [],
+            "winner_ids": [],
+            "end_time": end_time,
+            "ended": False,
+            "result_published": False,
+        }
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            message = await channel.send(
+                embed=build_drop_embed(drop),
+                view=DropView(),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception as error:
+            logger.exception(f"No pude publicar el Drop en #{channel.name}: {error}")
+            await interaction.followup.send(
+                "No pude publicar el Drop en este canal. Verifica los permisos del bot.",
+                ephemeral=True,
+            )
+            return
+
+        drop["message_id"] = message.id
+        try:
+            await create_drop_record(drop)
+        except Exception as error:
+            logger.exception(f"No pude guardar el Drop {message.id}: {error}")
+            try:
+                await message.edit(view=None)
+            except discord.HTTPException as edit_error:
+                logger.error(f"No pude desactivar el Drop sin registrar {message.id}: {edit_error}")
+            await interaction.followup.send(
+                "No pude guardar el Drop, así que sus botones fueron desactivados. Revisa los logs del bot.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send("✅ Drop publicado correctamente en este canal.", ephemeral=True)
+
 
 class TicketControlView(discord.ui.View):
     def __init__(self):
@@ -1153,6 +1717,7 @@ async def on_ready():
     
     # Registrar vista persistente de sorteos
     bot.add_view(GiveawayView())
+    bot.add_view(DropView())
     bot.add_view(TicketDropdownView())
     bot.add_view(TicketOpenView())
     bot.add_view(TicketControlView())
@@ -4253,6 +4818,30 @@ async def on_command_error(interaction: discord.Interaction, error):
 
 
 # --- COMANDOS DE SORTEOS (SLASH & PREFIX) ---
+
+@bot.tree.command(name="drop", description="Configura y publica un Drop en el canal de Drops")
+@app_commands.guild_only()
+async def create_drop_command(interaction: discord.Interaction):
+    if interaction.guild is None or not is_drop_channel(interaction.guild, interaction.channel_id):
+        channel = get_drop_channel(interaction.guild) if interaction.guild else None
+        allowed_channel = channel.mention if channel else f"#{config.DROP_CHANNEL_NAME}"
+        await interaction.response.send_message(
+            f"❌ `/drop` solo se puede usar en {allowed_channel}.",
+            ephemeral=True,
+        )
+        return
+
+    if not can_manage_drop(interaction.user):
+        await interaction.response.send_message(
+            "❌ Solo el dueño o el Staff autorizado puede crear un Drop.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_modal(
+        DropCreationModal(interaction.guild.id, interaction.channel_id)
+    )
+
 
 @bot.tree.command(name="sorteo_iniciar", description="Inicia un nuevo sorteo")
 @has_admin_role()
