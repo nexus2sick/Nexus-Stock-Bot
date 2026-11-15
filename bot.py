@@ -648,7 +648,6 @@ async def publish_drop_result(drop):
         await message.edit(
             embed=build_drop_embed(drop),
             view=None,
-            attachments=message.attachments,
         )
 
         if drop["winner_ids"]:
@@ -1205,7 +1204,6 @@ class DropView(discord.ui.View):
             await interaction.message.edit(
                 embed=build_drop_embed(drop),
                 view=self,
-                attachments=interaction.message.attachments,
             )
             await interaction.followup.send("¡Ya estás participando en el Drop!", ephemeral=True)
         except Exception as error:
@@ -4899,7 +4897,6 @@ async def create_drop_command(
 
     message_options = {
         "embed": build_drop_embed(drop),
-        "view": DropView(),
         "allowed_mentions": discord.AllowedMentions.none(),
     }
     if image_file is not None:
@@ -4917,38 +4914,27 @@ async def create_drop_command(
 
     drop["message_id"] = message.id
     if image_file is not None:
-        if not message.attachments:
-            logger.error(f"Discord no devolvió el adjunto del Drop {message.id}")
-            try:
-                await message.edit(view=None)
-            except discord.HTTPException as edit_error:
-                logger.error(f"No pude desactivar el Drop sin imagen {message.id}: {edit_error}")
-            await interaction.followup.send(
-                "Discord no confirmó la imagen adjunta; el Drop se publicó sin activar sus botones.",
-                ephemeral=True,
-            )
-            return
-
-        drop["image_url"] = message.attachments[0].url
-        try:
-            await message.edit(
-                embed=build_drop_embed(drop),
-                view=DropView(),
-                attachments=message.attachments,
-            )
-        except discord.HTTPException as error:
-            logger.warning(f"No pude actualizar la URL de imagen del Drop {message.id}: {error}")
+        if message.attachments:
+            drop["image_url"] = message.attachments[0].url
+        else:
+            logger.warning(f"Discord no devolvió el adjunto del Drop {message.id}")
 
     try:
         await create_drop_record(drop)
     except Exception as error:
         logger.exception(f"No pude guardar el Drop {message.id}: {error}")
-        try:
-            await message.edit(view=None)
-        except discord.HTTPException as edit_error:
-            logger.error(f"No pude desactivar el Drop sin registrar {message.id}: {edit_error}")
         await interaction.followup.send(
-            "No pude guardar el Drop, así que sus botones fueron desactivados. Revisa los logs del bot.",
+            "No pude guardar el Drop, por eso no activé los botones. Revisa los logs del bot.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        await message.edit(view=DropView())
+    except discord.HTTPException as error:
+        logger.exception(f"No pude activar los botones del Drop {message.id}: {error}")
+        await interaction.followup.send(
+            "El Drop se guardó, pero no pude activar sus botones. Revisa los permisos del bot.",
             ephemeral=True,
         )
         return
