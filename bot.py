@@ -3424,6 +3424,7 @@ async def ath_pago(interaction: discord.Interaction):
         interaction.guild is not None
         and (
             interaction.user.id == interaction.guild.owner_id
+            or (co_admin_role is not None and co_admin_role in interaction.user.roles)
             or interaction.user.guild_permissions.administrator
             or interaction.user.guild_permissions.manage_guild
             or any(allowed in role_name for role_name in normalized_roles for allowed in allowed_role_names)
