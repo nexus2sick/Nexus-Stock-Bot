@@ -90,3 +90,9 @@ timeout, la cuarta 10, la quinta 30 y la sexta o posteriores 1 hora. Los eventos
 se guardan en `owner_mentions.sqlite3` (o en `OWNER_MENTION_DB_PATH`) para que
 reiniciar el bot no reinicie el contador. En Render, configura esa ruta en un disco
 persistente para conservar el historial entre despliegues.
+
+## ATH Móvil
+
+`/ath` permite seleccionar el ATH de NEXUS o NOXY. Los números y nombres se
+configuran por separado en `config.py` mediante `ATH_NEXUS_PHONE`,
+`ATH_NEXUS_NAME`, `ATH_NOXY_PHONE` y `ATH_NOXY_NAME`.

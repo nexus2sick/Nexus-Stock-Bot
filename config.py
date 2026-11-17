@@ -36,6 +36,12 @@ MOD_LOG_CHANNEL_NAME = "chat-admins"
 VOUCHES_CHANNEL_ID = 1509359333538791459
 VOUCHES_CHANNEL_NAME = "✅・nexus-vouches"
 
+# Datos ATH Móvil por vendedor
+ATH_NEXUS_PHONE = "787-519-7893"
+ATH_NEXUS_NAME = "Eriel"
+ATH_NOXY_PHONE = "787-943-9480"
+ATH_NOXY_NAME = "Jane Rodriguez"
+
 # Configuración de múltiples canales de vouches para diferentes vendedores
 VOUCHES_CHANNELS = {
     "nexus": {"id": 1509359333538791459, "name": "✅・nexus-vouches"},

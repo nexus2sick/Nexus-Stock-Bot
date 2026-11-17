@@ -3846,6 +3846,65 @@ async def editar_canal(
         ephemeral=True,
     )
 
+def build_nexus_ath_embed():
+    return discord.Embed(
+        title="🔴 ATH MÓVIL",
+        description=(
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📱 **NÚMERO DE TELÉFONO**\n"
+            f"`{config.ATH_NEXUS_PHONE}`\n\n"
+            "👤 **NOMBRE DE ATH MÓVIL**\n"
+            f"`{config.ATH_NEXUS_NAME}`\n\n"
+            "⚠️ **NOTA IMPORTANTE**\n"
+            "Al realizar el pago, **envía únicamente el dinero**.\n"
+            "❌ **NO escribas ninguna nota, mensaje o comentario** junto al pago.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🔴 **NEXUS PAYMENTS**"
+        ),
+        color=config.COLOR_EMBED,
+    )
+
+
+def build_noxy_ath_embed():
+    return discord.Embed(
+        title="🟢 ATH MÓVIL",
+        description=(
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📱 **NÚMERO DE TELÉFONO**\n"
+            f"`{config.ATH_NOXY_PHONE}`\n\n"
+            "👤 **NOMBRE DE ATH MÓVIL**\n"
+            f"`{config.ATH_NOXY_NAME}`\n\n"
+            "⚠️ **NOTA IMPORTANTE**\n"
+            "Al realizar el pago, **envía únicamente el dinero**.\n"
+            "❌ **NO escribas ninguna nota, mensaje o comentario** junto al pago.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🟢 **NOXY ATH**"
+        ),
+        color=0x2ECC71,
+    )
+
+
+class ATHPaymentSelectionView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+
+    @discord.ui.button(label="NEXUS", style=discord.ButtonStyle.danger, emoji="🔴")
+    async def select_nexus(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content=None,
+            embed=build_nexus_ath_embed(),
+            view=None,
+        )
+
+    @discord.ui.button(label="NOXY", style=discord.ButtonStyle.success, emoji="🟢")
+    async def select_noxy(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content=None,
+            embed=build_noxy_ath_embed(),
+            view=None,
+        )
+
+
 @bot.tree.command(name="ath", description="Muestra la información oficial de pago por ATH Móvil")
 async def ath_pago(interaction: discord.Interaction):
     allowed_role_names = {"admin", "admins", "administrador", "administradores", "staff", "founder", "founders", "fundador", "fundadores", "creator", "creators", "creador", "creadores"}
@@ -3869,23 +3928,10 @@ async def ath_pago(interaction: discord.Interaction):
         await interaction.response.send_message("❌ Este comando es solo para Admins y Staff.", ephemeral=True)
         return
 
-    embed = discord.Embed(
-        title="🔴 ATH MÓVIL",
-        description=(
-            "━━━━━━━━━━━━━━━━━━━━\n\n"
-            "📱 **NÚMERO DE TELÉFONO**\n"
-            "`787-519-7893`\n\n"
-            "👤 **NOMBRE DE ATH MÓVIL**\n"
-            "`Eriel`\n\n"
-            "⚠️ **NOTA IMPORTANTE**\n"
-            "Al realizar el pago, **envía únicamente el dinero**.\n"
-            "❌ **NO escribas ninguna nota, mensaje o comentario** junto al pago.\n\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "🔴 **NEXUS PAYMENTS**"
-        ),
-        color=config.COLOR_EMBED
+    await interaction.response.send_message(
+        content="💳 **¿QUÉ ATH MÓVIL DESEAS UTILIZAR?**",
+        view=ATHPaymentSelectionView(),
     )
-    await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="nexusfn", description="Publica el anuncio oficial de NexusFN Checker")
 @has_admin_role()
