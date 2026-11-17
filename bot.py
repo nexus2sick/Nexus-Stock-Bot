@@ -7,12 +7,15 @@ import asyncio
 import logging
 import os
 import re
+import contextlib
 import time
 import typing
 from typing import Optional
 import aiohttp
 from aiohttp import web
 import json
+import sqlite3
+import uuid
 from datetime import datetime, timedelta
 import pytz
 import random
@@ -121,6 +124,13 @@ class NexusCommandTree(app_commands.CommandTree):
                 channel_name = drop_channel.mention if drop_channel else f"#{config.DROP_CHANNEL_NAME}"
                 raise ChannelRestrictionError(f"El comando `/drop` solo puede usarse en {channel_name}.")
             return True
+        if (
+            interaction.command is not None
+            and interaction.command.name == "encuesta"
+            and interaction.guild is not None
+            and can_manage_drop(interaction.user)
+        ):
+            return True
 
         if not config.COMMANDS_RESTRICTION_ENABLED or interaction.guild is None:
             return True
@@ -179,7 +189,6 @@ class NexusStoreBot(commands.Bot):
         self.ip_logger_links = set()  # Base de datos de IP loggers
         self.invite_spam_tracking = {}  # Tracking de spam de invitaciones
         self.moderation_warnings = {}
-        self.owner_mention_counts = {}
         self.recent_bans = {}
         self.faq_cooldown = {}
         self.ticket_warning_sent = set()
@@ -226,6 +235,8 @@ class NexusStoreBot(commands.Bot):
     async def setup_hook(self):
         await initialize_reputation_store()
         await initialize_drop_store()
+        await initialize_owner_mention_store()
+        await initialize_survey_store()
 
         app = web.Application()
 
@@ -283,6 +294,389 @@ DROP_FILE = os.getenv("DROPS_FILE", "drops.json")
 DROP_COLOR = 0x0C3B2E
 drop_store_lock = asyncio.Lock()
 drop_publish_lock = asyncio.Lock()
+SURVEYS_DB_PATH = os.getenv("SURVEYS_DB_PATH", "surveys.sqlite3")
+SURVEY_RED = 0xDC2626
+SURVEY_DARK_RED = 0x7F1D1D
+SURVEY_SILVER = 0xC0C0C0
+survey_publish_lock = asyncio.Lock()
+OWNER_MENTION_DB_PATH = os.getenv("OWNER_MENTION_DB_PATH", "owner_mentions.sqlite3")
+
+
+async def initialize_owner_mention_store():
+    def initialize():
+        directory = os.path.dirname(os.path.abspath(OWNER_MENTION_DB_PATH))
+        os.makedirs(directory, exist_ok=True)
+        connection = sqlite3.connect(OWNER_MENTION_DB_PATH, timeout=15)
+        try:
+            connection.execute("PRAGMA busy_timeout = 15000")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS owner_mention_events (
+                    id INTEGER PRIMARY KEY,
+                    guild_id INTEGER NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    mentioned_at REAL NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_owner_mention_events_lookup
+                ON owner_mention_events (guild_id, target_id, user_id, mentioned_at)
+                """
+            )
+            cutoff = time.time() - config.OWNER_MENTION_WINDOW_HOURS * 3600
+            connection.execute(
+                "DELETE FROM owner_mention_events WHERE mentioned_at <= ?",
+                (cutoff,),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    await asyncio.to_thread(initialize)
+    logger.info(f"Historial de menciones al Owner inicializado en {OWNER_MENTION_DB_PATH}")
+
+
+def _record_owner_mention_sync(guild_id, target_id, user_id, mentioned_at):
+    directory = os.path.dirname(os.path.abspath(OWNER_MENTION_DB_PATH))
+    os.makedirs(directory, exist_ok=True)
+    connection = sqlite3.connect(OWNER_MENTION_DB_PATH, timeout=15)
+    cutoff = mentioned_at - config.OWNER_MENTION_WINDOW_HOURS * 3600
+    try:
+        connection.execute("PRAGMA busy_timeout = 15000")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "DELETE FROM owner_mention_events WHERE mentioned_at <= ?",
+            (cutoff,),
+        )
+        connection.execute(
+            """
+            INSERT INTO owner_mention_events (guild_id, target_id, user_id, mentioned_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (guild_id, target_id, user_id, mentioned_at),
+        )
+        count = connection.execute(
+            """
+            SELECT COUNT(*) FROM owner_mention_events
+            WHERE guild_id = ? AND target_id = ? AND user_id = ? AND mentioned_at > ?
+            """,
+            (guild_id, target_id, user_id, cutoff),
+        ).fetchone()[0]
+        connection.commit()
+        return count
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+async def record_owner_mention(guild_id, target_id, user_id, mentioned_at=None):
+    timestamp = time.time() if mentioned_at is None else mentioned_at
+    return await asyncio.to_thread(
+        _record_owner_mention_sync,
+        guild_id,
+        target_id,
+        user_id,
+        timestamp,
+    )
+
+
+def owner_mention_timeout_minutes(mention_count):
+    return config.OWNER_MENTION_TIMEOUTS_MINUTES.get(
+        mention_count,
+        config.OWNER_MENTION_TIMEOUT_6_PLUS_MINUTES,
+    )
+
+
+@contextlib.contextmanager
+def survey_db_connection():
+    directory = os.path.dirname(os.path.abspath(SURVEYS_DB_PATH))
+    os.makedirs(directory, exist_ok=True)
+    connection = sqlite3.connect(SURVEYS_DB_PATH, timeout=15)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA busy_timeout = 15000")
+    try:
+        yield connection
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def _survey_from_row(connection, row):
+    if row is None:
+        return None
+    survey = {
+        "survey_id": row["survey_id"],
+        "message_id": row["message_id"],
+        "control_message_id": row["control_message_id"],
+        "control_channel_id": row["control_channel_id"],
+        "guild_id": row["guild_id"],
+        "channel_id": row["channel_id"],
+        "creator_id": row["creator_id"],
+        "question": row["question"],
+        "options": json.loads(row["options_json"]),
+        "end_time": row["end_time"],
+        "image_url": row["image_url"],
+        "ended": bool(row["ended"]),
+        "result_announced": bool(row["result_announced"]),
+    }
+    counts = [0] * len(survey["options"])
+    for vote_row in connection.execute(
+        "SELECT option_index, COUNT(*) AS vote_count FROM survey_votes "
+        "WHERE survey_id = ? GROUP BY option_index",
+        (survey["survey_id"],),
+    ):
+        if 0 <= vote_row["option_index"] < len(counts):
+            counts[vote_row["option_index"]] = vote_row["vote_count"]
+    survey["counts"] = counts
+    survey["total_votes"] = sum(counts)
+    return survey
+
+
+def _get_survey_sync(survey_id):
+    with survey_db_connection() as connection:
+        row = connection.execute(
+            "SELECT * FROM surveys WHERE survey_id = ?",
+            (survey_id,),
+        ).fetchone()
+        return _survey_from_row(connection, row)
+
+
+async def initialize_survey_store():
+    def initialize():
+        with survey_db_connection() as connection:
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS surveys (
+                    survey_id TEXT PRIMARY KEY,
+                    message_id INTEGER UNIQUE,
+                    control_message_id INTEGER UNIQUE,
+                    control_channel_id INTEGER,
+                    guild_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    creator_id INTEGER NOT NULL,
+                    question TEXT NOT NULL,
+                    options_json TEXT NOT NULL,
+                    end_time REAL NOT NULL,
+                    image_url TEXT,
+                    ended INTEGER NOT NULL DEFAULT 0,
+                    result_announced INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            survey_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(surveys)")
+            }
+            if "control_channel_id" not in survey_columns:
+                connection.execute("ALTER TABLE surveys ADD COLUMN control_channel_id INTEGER")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS survey_votes (
+                    survey_id TEXT NOT NULL REFERENCES surveys(survey_id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL,
+                    option_index INTEGER NOT NULL,
+                    PRIMARY KEY (survey_id, user_id)
+                )
+                """
+            )
+            connection.execute("DELETE FROM surveys WHERE message_id IS NULL")
+
+    await asyncio.to_thread(initialize)
+    logger.info(f"Almacenamiento SQLite de encuestas inicializado en {SURVEYS_DB_PATH}")
+
+
+async def create_survey_record(survey):
+    def create():
+        with survey_db_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO surveys (
+                    survey_id, guild_id, channel_id, creator_id, question,
+                    options_json, end_time, image_url
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    survey["survey_id"],
+                    survey["guild_id"],
+                    survey["channel_id"],
+                    survey["creator_id"],
+                    survey["question"],
+                    json.dumps(survey["options"], ensure_ascii=False),
+                    survey["end_time"],
+                    survey["image_url"],
+                ),
+            )
+
+    await asyncio.to_thread(create)
+
+
+async def set_survey_message(survey_id, message_id, image_url):
+    def update():
+        with survey_db_connection() as connection:
+            connection.execute(
+                "UPDATE surveys SET message_id = ?, image_url = ? WHERE survey_id = ?",
+                (message_id, image_url, survey_id),
+            )
+
+    await asyncio.to_thread(update)
+
+
+async def set_survey_control_message(survey_id, channel_id, message_id):
+    def update():
+        with survey_db_connection() as connection:
+            connection.execute(
+                "UPDATE surveys SET control_channel_id = ?, control_message_id = ? WHERE survey_id = ?",
+                (channel_id, message_id, survey_id),
+            )
+
+    await asyncio.to_thread(update)
+
+
+def get_survey_staff_channel(guild):
+    channel = (
+        guild.get_channel(config.SURVEY_STAFF_CHANNEL_ID)
+        if config.SURVEY_STAFF_CHANNEL_ID
+        else None
+    )
+    if channel is None:
+        configured_name = config.SURVEY_STAFF_CHANNEL_NAME.lstrip("#")
+        channel = discord.utils.get(guild.text_channels, name=configured_name)
+    if not isinstance(channel, discord.TextChannel):
+        return None, "No encontré el canal de texto configurado para el control de Staff."
+    if channel.permissions_for(guild.default_role).view_channel:
+        return None, f"El canal {channel.mention} no es privado: ocúltalo a @everyone."
+    bot_member = guild.me
+    if bot_member is None:
+        return None, "No pude verificar los permisos del bot en el canal de Staff."
+    bot_permissions = channel.permissions_for(bot_member)
+    if not bot_permissions.view_channel or not bot_permissions.send_messages:
+        return None, f"El bot necesita ver y enviar mensajes en {channel.mention}."
+    return channel, None
+
+
+async def delete_survey_record(survey_id):
+    def delete():
+        with survey_db_connection() as connection:
+            connection.execute("DELETE FROM surveys WHERE survey_id = ?", (survey_id,))
+
+    await asyncio.to_thread(delete)
+
+
+async def get_survey(survey_id):
+    return await asyncio.to_thread(_get_survey_sync, survey_id)
+
+
+async def list_active_surveys():
+    def read():
+        with survey_db_connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM surveys WHERE ended = 0 AND message_id IS NOT NULL"
+            ).fetchall()
+            return [_survey_from_row(connection, row) for row in rows]
+
+    return await asyncio.to_thread(read)
+
+
+async def list_pending_survey_results():
+    def read():
+        with survey_db_connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM surveys WHERE ended = 1 AND result_announced = 0 AND message_id IS NOT NULL"
+            ).fetchall()
+            return [_survey_from_row(connection, row) for row in rows]
+
+    return await asyncio.to_thread(read)
+
+
+async def mark_survey_result_announced(survey_id):
+    def update():
+        with survey_db_connection() as connection:
+            connection.execute(
+                "UPDATE surveys SET result_announced = 1 WHERE survey_id = ?",
+                (survey_id,),
+            )
+
+    await asyncio.to_thread(update)
+
+
+async def cast_survey_vote(survey_id, user_id, option_index):
+    def vote():
+        with survey_db_connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM surveys WHERE survey_id = ?",
+                (survey_id,),
+            ).fetchone()
+            if row is None:
+                return "missing", None
+            if row["ended"]:
+                return "ended", _survey_from_row(connection, row)
+            if row["end_time"] <= discord.utils.utcnow().timestamp():
+                return "expired", _survey_from_row(connection, row)
+
+            options = json.loads(row["options_json"])
+            if not 0 <= option_index < len(options):
+                return "invalid_option", None
+            previous = connection.execute(
+                "SELECT option_index FROM survey_votes WHERE survey_id = ? AND user_id = ?",
+                (survey_id, user_id),
+            ).fetchone()
+            if previous is not None and previous["option_index"] == option_index:
+                return "unchanged", _survey_from_row(connection, row)
+            connection.execute(
+                """
+                INSERT INTO survey_votes (survey_id, user_id, option_index)
+                VALUES (?, ?, ?)
+                ON CONFLICT (survey_id, user_id)
+                DO UPDATE SET option_index = excluded.option_index
+                """,
+                (survey_id, user_id, option_index),
+            )
+            updated = connection.execute(
+                "SELECT * FROM surveys WHERE survey_id = ?",
+                (survey_id,),
+            ).fetchone()
+            return ("updated" if previous else "voted"), _survey_from_row(connection, updated)
+
+    return await asyncio.to_thread(vote)
+
+
+async def finish_survey(survey_id):
+    def finish():
+        with survey_db_connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM surveys WHERE survey_id = ?",
+                (survey_id,),
+            ).fetchone()
+            if row is None:
+                return "missing", None
+            if row["ended"]:
+                return "ended", _survey_from_row(connection, row)
+            connection.execute(
+                "UPDATE surveys SET ended = 1 WHERE survey_id = ? AND ended = 0",
+                (survey_id,),
+            )
+            updated = connection.execute(
+                "SELECT * FROM surveys WHERE survey_id = ?",
+                (survey_id,),
+            ).fetchone()
+            return "finished", _survey_from_row(connection, updated)
+
+    return await asyncio.to_thread(finish)
 
 
 def get_drop_channel(guild):
@@ -1707,6 +2101,11 @@ async def on_ready():
     bot.add_view(TicketDropdownView())
     bot.add_view(TicketOpenView())
     bot.add_view(TicketControlView())
+
+    await restore_active_survey_views()
+    survey_task = getattr(bot, "_survey_task", None)
+    if survey_task is None or survey_task.done():
+        bot._survey_task = bot.loop.create_task(check_surveys_loop())
     
     # Iniciar el bucle de verificación de sorteos
     bot.loop.create_task(check_giveaways_loop())
@@ -2512,42 +2911,78 @@ async def on_message(message):
         logger.error(f"Error enviando FAQ automático: {e}")
 
     if message.guild and message.guild.owner_id in message.raw_mentions and message.author.id != message.guild.owner_id:
-        mention_key = (message.guild.id, message.author.id)
-        mention_count = bot.owner_mention_counts.get(mention_key, 0) + 1
-        bot.owner_mention_counts[mention_key] = mention_count
+        try:
+            mention_count = await record_owner_mention(
+                message.guild.id,
+                message.guild.owner_id,
+                message.author.id,
+            )
+        except (OSError, sqlite3.Error):
+            logger.exception(
+                f"No pude registrar las menciones al Owner de {message.author.id} "
+                f"en el servidor {message.guild.id}"
+            )
+            mention_count = None
 
-        if mention_count in (2, 3):
+        if mention_count == 2 or (mention_count is not None and mention_count >= 3):
             sanction_text = ""
-            if mention_count == 3:
+            timeout_minutes = None
+            if mention_count >= 3:
+                timeout_minutes = owner_mention_timeout_minutes(mention_count)
                 try:
                     await message.author.timeout(
-                        timedelta(minutes=5),
-                        reason="Menciones repetidas al Owner"
+                        timedelta(minutes=timeout_minutes),
+                        reason=f"Menciones repetidas al Owner: {mention_count} en 48 horas",
                     )
-                    sanction_text = "\n🚨 **Sanción aplicada:** `TIMEOUT 5 MIN`\n"
-                    await send_mod_log(message.guild, message.author, "TIMEOUT 5 MIN", "Menciones repetidas al Owner")
+                    sanction_text = f"\n🚨 **Sanción aplicada:** `TIMEOUT {timeout_minutes} MIN`\n"
+                    try:
+                        await send_mod_log(
+                            message.guild,
+                            message.author,
+                            f"TIMEOUT {timeout_minutes} MIN",
+                            f"Menciones repetidas al Owner ({mention_count} en 48 horas)",
+                        )
+                    except discord.HTTPException:
+                        logger.exception(
+                            f"No pude publicar el mod-log de menciones para {message.author.id}"
+                        )
                 except discord.Forbidden:
-                    sanction_text = "\n🚨 **Sanción aplicada:** `TIMEOUT FALLIDO (sin permisos)`\n"
+                    sanction_text = "\n🚨 **Sanción fallida:** el bot no tiene permiso para aplicar timeout.\n"
+                except discord.HTTPException:
+                    logger.exception(f"No pude aplicar timeout por menciones a {message.author.id}")
+                    sanction_text = "\n🚨 **Sanción fallida:** Discord rechazó el timeout.\n"
+
+            if mention_count == 2:
+                alert_title = "⚠️ NEXUS STOCK — ADVERTENCIA"
+                alert_detail = (
+                    "Ya acumulaste **2 menciones en 48 horas**. "
+                    "Si llegas a 3 dentro de ese período, recibirás **5 minutos** de timeout."
+                )
+            else:
+                alert_title = "🚫 NEXUS STOCK — SANCIÓN"
+                alert_detail = (
+                    f"Esta es tu **mención {mention_count} en 48 horas**. "
+                    f"La sanción correspondiente es **{timeout_minutes} minutos**."
+                )
 
             warning_embed = discord.Embed(
-                title="⚠️ NEXUS STOCK — ADVERTENCIA",
+                title=alert_title,
                 description=(
                     f"> **{message.author.mention}**, has mencionado al Owner varias veces.\n"
                     "📌 El **Owner revisará tu mensaje cuando pueda**.\n"
                     "🔔 **Mencionarlo una sola vez es más que suficiente.**\n\n"
-                    "⚠️ Evita repetir las menciones innecesariamente.\n\n"
-                    "🚨 **A la tercera mención:** se aplicará una **sanción de 5 minutos**.\n"
+                    f"⚠️ {alert_detail}\n"
                     f"{sanction_text}\n"
                     "🔴 **Nexus Stock Staff**"
                 ),
-                color=config.COLOR_EMBED
+                color=config.COLOR_EMBED,
             )
             warning_embed.set_thumbnail(url=message.author.display_avatar.url)
             warning_embed.set_footer(text="NexusStore © Todos los derechos reservados")
             warning_embed.timestamp = discord.utils.utcnow()
             await message.channel.send(
                 embed=warning_embed,
-                allowed_mentions=discord.AllowedMentions(users=True)
+                allowed_mentions=discord.AllowedMentions(users=True),
             )
 
     if await moderate_message(message):
@@ -3925,6 +4360,511 @@ def format_vote_duration(seconds: int) -> str:
     return f"{seconds}s"
 
 
+def survey_progress_bar(votes: int, total_votes: int, width: int = 12) -> str:
+    ratio = votes / total_votes if total_votes else 0
+    filled = round(ratio * width)
+    return f"`{'█' * filled}{'░' * (width - filled)}`"
+
+
+def build_survey_embed(survey):
+    ended = survey["ended"]
+    status = "🔒 **FINALIZADA**" if ended else "🟢 **ACTIVA**"
+    description = f"{status}\n\n**{survey['question'].upper()}**"
+    if ended:
+        highest = max(survey["counts"], default=0)
+        if highest == 0:
+            description += "\n\n📊 **No se registraron votos.**"
+        else:
+            winners = [
+                survey["options"][index]
+                for index, count in enumerate(survey["counts"])
+                if count == highest
+            ]
+            if len(winners) == 1:
+                description += f"\n\n🏆 **OPCIÓN GANADORA: {winners[0]}**"
+            else:
+                description += f"\n\n🤝 **EMPATE: {' · '.join(winners)}**"
+    else:
+        description += "\n\n📊 Vota pulsando el botón de tu opción."
+
+    embed = discord.Embed(
+        title="🔴 NEXUS STOCK • 📊 ENCUESTA DEL STOCK",
+        description=description,
+        color=SURVEY_RED if not ended else SURVEY_DARK_RED,
+    )
+    order = list(range(len(survey["options"])))
+    if ended:
+        order.sort(key=lambda index: (-survey["counts"][index], index))
+    for rank, index in enumerate(order):
+        votes = survey["counts"][index]
+        percentage = (votes / survey["total_votes"] * 100) if survey["total_votes"] else 0
+        rank_prefix = f"{rank + 1}. " if ended else "🔴 "
+        embed.add_field(
+            name=f"{rank_prefix}{survey['options'][index]}",
+            value=f"**{votes} votos** · **{percentage:.1f}%**\n{survey_progress_bar(votes, survey['total_votes'])}",
+            inline=False,
+        )
+
+    embed.add_field(name="👥 Total de votos", value=str(survey["total_votes"]), inline=True)
+    if not ended:
+        embed.add_field(
+            name="⏳ Finaliza",
+            value=f"<t:{int(survey['end_time'])}:R>",
+            inline=True,
+        )
+    embed.set_footer(text="NEXUS STOCK © — LA COMUNIDAD DECIDE", icon_url=None)
+    if survey["image_url"]:
+        embed.set_image(url=survey["image_url"])
+    embed.timestamp = discord.utils.utcnow()
+    return embed
+
+
+def build_survey_results_embed(survey):
+    embed = discord.Embed(
+        title="🏆 RESULTADOS FINALES — NEXUS STOCK",
+        description="La comunidad de Nexus Stock ha decidido.",
+        color=SURVEY_SILVER,
+    )
+    order = sorted(
+        range(len(survey["options"])),
+        key=lambda index: (-survey["counts"][index], index),
+    )
+    medals = ["🥇", "🥈", "🥉"]
+    for rank, index in enumerate(order):
+        option = survey["options"][index]
+        votes = survey["counts"][index]
+        percentage = (votes / survey["total_votes"] * 100) if survey["total_votes"] else 0
+        rank_label = medals[rank] if rank < len(medals) else f"{rank + 1}."
+        embed.add_field(
+            name=f"{rank_label} {option}",
+            value=f"**{votes} votos** · **{percentage:.1f}%**",
+            inline=True,
+        )
+
+    highest = max(survey["counts"], default=0)
+    winners = [
+        survey["options"][index]
+        for index, count in enumerate(survey["counts"])
+        if highest > 0 and count == highest
+    ]
+    if not winners:
+        result = "No hubo votos, así que no hay una opción ganadora."
+    elif len(winners) == 1:
+        result = f"👑 **OPCIÓN GANADORA: {winners[0]}**"
+    else:
+        result = f"🤝 **EMPATE ENTRE:** {' · '.join(winners)}"
+    embed.add_field(name="🏆 Resultado", value=result, inline=False)
+    embed.add_field(name="👥 Total de votos", value=str(survey["total_votes"]), inline=False)
+    embed.set_footer(text="NEXUS STOCK © — LA COMUNIDAD DECIDE")
+    embed.timestamp = discord.utils.utcnow()
+    return embed
+
+
+class SurveyVoteButton(discord.ui.Button):
+    def __init__(self, survey_id: str, option_index: int, option: str):
+        super().__init__(
+            label=option,
+            style=discord.ButtonStyle.danger,
+            emoji="🔴",
+            row=option_index // 5,
+            custom_id=f"nexus_survey_vote:{survey_id}:{option_index}",
+        )
+        self.survey_id = survey_id
+        self.option_index = option_index
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            status, survey = await cast_survey_vote(
+                self.survey_id,
+                interaction.user.id,
+                self.option_index,
+            )
+        except sqlite3.Error as error:
+            logger.exception(f"SQLite rechazó el voto de la encuesta {self.survey_id}: {error}")
+            await interaction.followup.send(
+                "No pude guardar tu voto. Inténtalo de nuevo.",
+                ephemeral=True,
+            )
+            return
+
+        if status == "missing":
+            await interaction.followup.send("Esta encuesta ya no existe.", ephemeral=True)
+            return
+        if status in {"ended", "expired"}:
+            if status == "expired":
+                await finish_survey(self.survey_id)
+            await interaction.followup.send("Esta encuesta ya finalizó.", ephemeral=True)
+            return
+        if status == "invalid_option":
+            await interaction.followup.send("Esa opción no pertenece a esta encuesta.", ephemeral=True)
+            return
+        if status == "unchanged":
+            await interaction.followup.send("Tu voto ya está registrado en esa opción.", ephemeral=True)
+            return
+
+        try:
+            await interaction.message.edit(embed=build_survey_embed(survey))
+        except discord.HTTPException as error:
+            logger.exception(f"No pude actualizar el embed de la encuesta {self.survey_id}: {error}")
+            await interaction.followup.send(
+                "Tu voto quedó registrado, pero no pude actualizar el contador en el embed.",
+                ephemeral=True,
+            )
+            return
+
+        response = (
+            f"✅ Tu voto fue actualizado a **{survey['options'][self.option_index]}**."
+            if status == "updated"
+            else f"✅ Tu voto por **{survey['options'][self.option_index]}** quedó registrado."
+        )
+        await interaction.followup.send(response, ephemeral=True)
+
+
+class SurveyView(discord.ui.View):
+    def __init__(self, survey):
+        super().__init__(timeout=None)
+        for index, option in enumerate(survey["options"]):
+            self.add_item(SurveyVoteButton(survey["survey_id"], index, option))
+        if survey["ended"]:
+            for item in self.children:
+                item.disabled = True
+
+
+class SurveyFinishButton(discord.ui.Button):
+    def __init__(self, survey_id: str):
+        super().__init__(
+            label="FINALIZAR ENCUESTA",
+            style=discord.ButtonStyle.secondary,
+            emoji="🔒",
+            custom_id=f"nexus_survey_finish:{survey_id}",
+        )
+        self.survey_id = survey_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.guild is None or not can_manage_drop(interaction.user):
+            await interaction.response.send_message(
+                "❌ Solo el Staff autorizado puede finalizar esta encuesta.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            survey = await get_survey(self.survey_id)
+        except sqlite3.Error as error:
+            logger.exception(f"No pude leer encuesta {self.survey_id}: {error}")
+            await interaction.followup.send("No pude leer la encuesta; revisa los logs del bot.", ephemeral=True)
+            return
+        if survey is None or survey["control_message_id"] != interaction.message.id:
+            await interaction.followup.send("Esta encuesta ya no está disponible.", ephemeral=True)
+            return
+
+        try:
+            status, _ = await finish_survey(self.survey_id)
+        except sqlite3.Error as error:
+            logger.exception(f"No pude finalizar encuesta {self.survey_id}: {error}")
+            await interaction.followup.send("No pude finalizar la encuesta; revisa los logs del bot.", ephemeral=True)
+            return
+        if status == "missing":
+            await interaction.followup.send("Esta encuesta ya no existe.", ephemeral=True)
+            return
+        if status == "ended":
+            await interaction.followup.send("Esta encuesta ya había finalizado.", ephemeral=True)
+            return
+        try:
+            await publish_survey_result(self.survey_id)
+        except (discord.HTTPException, sqlite3.Error) as error:
+            logger.exception(f"No pude publicar resultados de encuesta {self.survey_id}: {error}")
+            await interaction.followup.send(
+                "La encuesta se finalizó, pero no pude publicar los resultados. El bot los reintentará.",
+                ephemeral=True,
+            )
+            return
+        await interaction.followup.send("✅ Encuesta finalizada y resultados publicados.", ephemeral=True)
+
+
+class SurveyControlView(discord.ui.View):
+    def __init__(self, survey_id: str, ended: bool = False):
+        super().__init__(timeout=None)
+        button = SurveyFinishButton(survey_id)
+        button.disabled = ended
+        self.add_item(button)
+
+
+async def publish_survey_result(survey_id: str):
+    async with survey_publish_lock:
+        survey = await get_survey(survey_id)
+        if survey is None or survey["result_announced"] or survey["message_id"] is None:
+            return
+
+        channel = bot.get_channel(survey["channel_id"])
+        if channel is None:
+            channel = await bot.fetch_channel(survey["channel_id"])
+        poll_message = await channel.fetch_message(survey["message_id"])
+        await poll_message.edit(
+            embed=build_survey_embed(survey),
+            view=SurveyView(survey),
+        )
+
+        if survey["control_message_id"] is not None:
+            try:
+                control_channel_id = survey["control_channel_id"] or survey["channel_id"]
+                control_channel = bot.get_channel(control_channel_id)
+                if control_channel is None:
+                    control_channel = await bot.fetch_channel(control_channel_id)
+                control_message = await control_channel.fetch_message(survey["control_message_id"])
+                await control_message.edit(
+                    content="🔒 Esta encuesta ya finalizó.",
+                    view=SurveyControlView(survey_id, ended=True),
+                )
+            except discord.NotFound:
+                logger.info(f"El mensaje de control de la encuesta {survey_id} ya no existe")
+
+        await channel.send(
+            embed=build_survey_results_embed(survey),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        await mark_survey_result_announced(survey_id)
+
+
+async def restore_active_survey_views():
+    for survey in await list_active_surveys():
+        if survey["message_id"] is not None:
+            bot.add_view(SurveyView(survey), message_id=survey["message_id"])
+        if survey["control_message_id"] is not None:
+            bot.add_view(
+                SurveyControlView(survey["survey_id"]),
+                message_id=survey["control_message_id"],
+            )
+
+    for survey in await list_pending_survey_results():
+        try:
+            await publish_survey_result(survey["survey_id"])
+        except (discord.HTTPException, sqlite3.Error) as error:
+            logger.exception(f"No pude restaurar resultados de la encuesta {survey['survey_id']}: {error}")
+
+
+async def check_surveys_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            now = discord.utils.utcnow().timestamp()
+            for survey in await list_active_surveys():
+                if survey["end_time"] <= now:
+                    status, _ = await finish_survey(survey["survey_id"])
+                    if status == "finished":
+                        try:
+                            await publish_survey_result(survey["survey_id"])
+                        except (discord.HTTPException, sqlite3.Error) as error:
+                            logger.exception(
+                                f"No pude publicar resultados de encuesta {survey['survey_id']}: {error}"
+                            )
+            for survey in await list_pending_survey_results():
+                try:
+                    await publish_survey_result(survey["survey_id"])
+                except (discord.HTTPException, sqlite3.Error) as error:
+                    logger.exception(
+                        f"No pude recuperar resultados de encuesta {survey['survey_id']}: {error}"
+                    )
+        except sqlite3.Error as error:
+            logger.exception(f"Error consultando encuestas SQLite: {error}")
+        await asyncio.sleep(10)
+
+
+class SurveyCreationModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Configurar encuesta Nexus Stock", timeout=300)
+        self.question_input = discord.ui.TextInput(
+            max_length=300,
+            placeholder="¿Qué cuenta quieren que traigamos al Stock?",
+            style=discord.TextStyle.paragraph,
+        )
+        self.options_input = discord.ui.TextInput(
+            max_length=4000,
+            placeholder="Escribe una opción por línea (máximo 25)",
+            style=discord.TextStyle.paragraph,
+        )
+        self.duration_input = discord.ui.TextInput(
+            max_length=10,
+            placeholder="30m, 1h, 1d",
+        )
+        self.image_upload = discord.ui.FileUpload(required=False, max_values=1)
+        self.add_item(discord.ui.Label(text="Pregunta", component=self.question_input))
+        self.add_item(discord.ui.Label(text="Opciones (una por línea)", component=self.options_input))
+        self.add_item(discord.ui.Label(text="Duración", component=self.duration_input))
+        self.add_item(discord.ui.Label(text="Imagen opcional", component=self.image_upload))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild is None or not can_manage_drop(interaction.user):
+            await interaction.response.send_message(
+                "❌ Solo el Staff autorizado puede crear encuestas.",
+                ephemeral=True,
+            )
+            return
+        staff_channel, channel_error = get_survey_staff_channel(interaction.guild)
+        if channel_error:
+            await interaction.response.send_message(channel_error, ephemeral=True)
+            return
+
+        question = self.question_input.value.strip()
+        options = [
+            re.sub(r"^\s*(?:[-*•]\s*)", "", line).strip()
+            for line in self.options_input.value.splitlines()
+        ]
+        options = [option for option in options if option]
+        if not question or len(options) < 2 or len(options) > 25:
+            await interaction.response.send_message(
+                "Incluye una pregunta y de 2 a 25 opciones, una por línea.",
+                ephemeral=True,
+            )
+            return
+        if any(len(option) > 80 for option in options):
+            await interaction.response.send_message(
+                "Cada opción debe tener como máximo 80 caracteres para caber en su botón.",
+                ephemeral=True,
+            )
+            return
+        if len({option.casefold() for option in options}) != len(options):
+            await interaction.response.send_message(
+                "No repitas opciones; cada botón debe representar una opción distinta.",
+                ephemeral=True,
+            )
+            return
+
+        duration_seconds = parse_duration(self.duration_input.value.strip())
+        if duration_seconds is None or not 60 <= duration_seconds <= 30 * 86400:
+            await interaction.response.send_message(
+                "La duración debe ser de 1 minuto a 30 días (por ejemplo: `30m`, `1h` o `2d`).",
+                ephemeral=True,
+            )
+            return
+
+        attachments = self.image_upload.values
+        image = attachments[0] if attachments else None
+        if image is not None and (not image.content_type or not image.content_type.startswith("image/")):
+            await interaction.response.send_message("El archivo adjunto debe ser una imagen.", ephemeral=True)
+            return
+
+        image_file = None
+        image_url = None
+        if image is not None:
+            try:
+                image_file = await image.to_file()
+                image_url = f"attachment://{image_file.filename}"
+            except discord.HTTPException as error:
+                logger.exception(f"No pude leer la imagen de la encuesta: {error}")
+                await interaction.response.send_message("No pude procesar la imagen adjunta.", ephemeral=True)
+                return
+
+        survey = {
+            "survey_id": uuid.uuid4().hex,
+            "message_id": None,
+            "control_message_id": None,
+            "guild_id": interaction.guild.id,
+            "channel_id": interaction.channel_id,
+            "creator_id": interaction.user.id,
+            "question": question,
+            "options": options,
+            "end_time": discord.utils.utcnow().timestamp() + duration_seconds,
+            "image_url": image_url,
+            "ended": False,
+            "result_announced": False,
+            "counts": [0] * len(options),
+            "total_votes": 0,
+        }
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await create_survey_record(survey)
+        except sqlite3.Error as error:
+            logger.exception(f"No pude guardar la encuesta SQLite: {error}")
+            await interaction.followup.send(
+                "No pude guardar la encuesta en SQLite. Revisa los logs y la ruta de la base de datos.",
+                ephemeral=True,
+            )
+            return
+
+        send_options = {
+            "embed": build_survey_embed(survey),
+            "allowed_mentions": discord.AllowedMentions.none(),
+        }
+        if image_file is not None:
+            send_options["file"] = image_file
+        try:
+            poll_message = await interaction.channel.send(**send_options)
+        except discord.HTTPException as error:
+            await delete_survey_record(survey["survey_id"])
+            logger.exception(f"No pude publicar la encuesta: {error}")
+            await interaction.followup.send("No pude publicar la encuesta en este canal.", ephemeral=True)
+            return
+
+        if image_file is not None and not poll_message.attachments:
+            await delete_survey_record(survey["survey_id"])
+            try:
+                await poll_message.delete()
+            except discord.HTTPException as error:
+                logger.error(f"No pude retirar la encuesta sin adjunto {poll_message.id}: {error}")
+            await interaction.followup.send(
+                "Discord no confirmó la imagen adjunta, así que no activé la encuesta.",
+                ephemeral=True,
+            )
+            return
+
+        public_image_url = poll_message.attachments[0].url if poll_message.attachments else image_url
+        try:
+            await set_survey_message(survey["survey_id"], poll_message.id, public_image_url)
+            survey["message_id"] = poll_message.id
+            survey["image_url"] = public_image_url
+            await poll_message.edit(
+                embed=build_survey_embed(survey),
+                view=SurveyView(survey),
+            )
+        except (sqlite3.Error, discord.HTTPException) as error:
+            logger.exception(f"No pude activar la encuesta {survey['survey_id']}: {error}")
+            await interaction.followup.send(
+                "La encuesta se publicó, pero no pude guardar o activar sus botones. Revisa los logs.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            control_message = await staff_channel.send(
+                f"🔒 **Control de Staff** — encuesta de {interaction.user.mention}: "
+                f"[abrir encuesta]({poll_message.jump_url})",
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            await set_survey_control_message(
+                survey["survey_id"],
+                staff_channel.id,
+                control_message.id,
+            )
+            await control_message.edit(view=SurveyControlView(survey["survey_id"]))
+        except (sqlite3.Error, discord.HTTPException) as error:
+            logger.exception(f"No pude crear el control de Staff de la encuesta {survey['survey_id']}: {error}")
+            await interaction.followup.send(
+                "La encuesta está activa, pero no pude publicar el botón de Staff para finalizarla.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            f"✅ Encuesta publicada en {interaction.channel.mention}; el botón de cierre está en {staff_channel.mention}.",
+            ephemeral=True,
+        )
+
+
+@bot.tree.command(name="encuesta", description="Crea una encuesta roja de Nexus Stock")
+@app_commands.guild_only()
+async def encuesta(interaction: discord.Interaction):
+    if not can_manage_drop(interaction.user):
+        await interaction.response.send_message(
+            "❌ Solo el Staff autorizado puede crear encuestas.",
+            ephemeral=True,
+        )
+        return
+    await interaction.response.send_modal(SurveyCreationModal())
+
+
 class VotingButton(discord.ui.Button):
     def __init__(self, label: str, view_ref):
         super().__init__(label=label, style=discord.ButtonStyle.danger)
@@ -4207,135 +5147,197 @@ async def voice_status(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # Comandos de Moderación
-@bot.tree.command(name="clear", description="Elimina mensajes del canal")
-@app_commands.describe(
-    cantidad="Número de mensajes a eliminar (1-100), o 'todos' para eliminar todos"
-)
-@has_co_admin_access()
-async def clear_messages(interaction: discord.Interaction, cantidad: str):
-    """Elimina mensajes del canal con opción de cantidad o todos"""
-    try:
-        # Verificar si la interacción ya fue respondida
-        if interaction.response.is_done():
-            await interaction.followup.send("Esta interacción ya está siendo procesada.", ephemeral=True)
-            return
-        
-        await interaction.response.defer(ephemeral=True)
-        
-        # Verificar permisos del bot
-        if not interaction.channel.permissions_for(interaction.guild.me).manage_messages:
-            embed = discord.Embed(
-                title="Sin Permisos",
-                description="No tengo permisos para eliminar mensajes en este canal.",
-                color=config.COLOR_EMBED
-            )
-            embed.set_footer(text="NexusStore © Todos los derechos reservados")
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
-        
-        # Procesar el parámetro cantidad
-        if cantidad.lower() == 'todos':
-            # Eliminar todos los mensajes posibles
-            try:
-                deleted = await interaction.channel.purge(
-                    limit=100,
-                    check=lambda m: not m.pinned and m.author.id != interaction.guild.owner_id,
-                )
-                count = len(deleted)
-                
-                embed = discord.Embed(
-                    title="Canal Limpiado",
-                    description=f"Se eliminaron **{count} mensajes** del canal.\n(Los mensajes anclados fueron preservados)",
-                    color=config.COLOR_EMBED
-                )
-                embed.set_footer(text=f"Limpiado por {interaction.user.name} | NexusStore © Todos los derechos reservados")
-                embed.timestamp = discord.utils.utcnow()
-                
-                await interaction.followup.send(embed=embed, ephemeral=True)
-                    
-            except discord.Forbidden:
-                embed = discord.Embed(
-                    title="Error",
-                    description="No puedo eliminar mensajes antiguos (más de 14 días).",
-                    color=config.COLOR_EMBED
-                )
-                embed.set_footer(text="NexusStore © Todos los derechos reservados")
-                await interaction.followup.send(embed=embed, ephemeral=True)
-                
-            except Exception as e:
-                embed = discord.Embed(
-                    title="Error",
-                    description=f"Ocurrió un error al limpiar el canal: {type(e).__name__}",
-                    color=config.COLOR_EMBED
-                )
-                embed.set_footer(text="NexusStore © Todos los derechos reservados")
-                await interaction.followup.send(embed=embed, ephemeral=True)
-                
-        else:
-            # Intentar convertir a número
-            try:
-                num = int(cantidad)
-                if num < 1 or num > 100:
-                    raise ValueError
-                
-                # Eliminar la cantidad especificada
-                deleted = await interaction.channel.purge(
-                    limit=num,
-                    check=lambda m: not m.pinned and m.author.id != interaction.guild.owner_id,
-                )
-                count = len(deleted)
-                
-                embed = discord.Embed(
-                    title="Mensajes Eliminados",
-                    description=f"Se eliminaron **{count} mensajes** del canal.",
-                    color=config.COLOR_EMBED
-                )
-                embed.set_footer(text=f"Limpiado por {interaction.user.name} | NexusStore © Todos los derechos reservados")
-                embed.timestamp = discord.utils.utcnow()
-                
-                await interaction.followup.send(embed=embed, ephemeral=True)
-                    
-            except ValueError:
-                embed = discord.Embed(
-                    title="Cantidad Inválida",
-                    description="Por favor, especifica un número entre 1 y 100, o escribe 'todos'.",
-                    color=config.COLOR_EMBED
-                )
-                embed.add_field(
-                    name="Ejemplos:",
-                    value="• `/clear cantidad:10` - Elimina 10 mensajes\n• `/clear cantidad:todos` - Elimina todos los mensajes",
-                    inline=False
-                )
-                embed.set_footer(text="NexusStore © Todos los derechos reservados")
-                await interaction.followup.send(embed=embed, ephemeral=True)
-                
-            except discord.Forbidden:
-                embed = discord.Embed(
-                    title="Error",
-                    description="No puedo eliminar mensajes antiguos (más de 14 días).",
-                    color=config.COLOR_EMBED
-                )
-                embed.set_footer(text="NexusStore © Todos los derechos reservados")
-                await interaction.followup.send(embed=embed, ephemeral=True)
-                
-            except Exception as e:
-                embed = discord.Embed(
-                    title="Error",
-                    description=f"Ocurrió un error al eliminar mensajes: {type(e).__name__}",
-                    color=config.COLOR_EMBED
-                )
-                embed.set_footer(text="NexusStore © Todos los derechos reservados")
-                await interaction.followup.send(embed=embed, ephemeral=True)
-                
-    except Exception as e:
-        logger.error(f"Error crítico en clear_messages: {e}")
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.send_message("Ocurrió un error inesperado.", ephemeral=True)
+async def delete_channel_messages(channel, owner_id: int, max_messages: Optional[int] = None) -> int:
+    if max_messages == 0:
+        return 0
+
+    deleted_count = 0
+    pending_messages = []
+    cutoff = discord.utils.utcnow() - timedelta(days=14)
+
+    async def delete_pending():
+        nonlocal deleted_count
+        while pending_messages:
+            batch = pending_messages[:100]
+            if len(batch) == 1:
+                await batch[0].delete()
             else:
-                await interaction.followup.send("Ocurrió un error inesperado.", ephemeral=True)
-        except:
-            pass
+                await channel.delete_messages(batch, reason="Limpieza solicitada con comando del bot")
+            deleted_count += len(batch)
+            del pending_messages[:len(batch)]
+
+    async for message in channel.history(limit=None):
+        if not message.type.is_deletable() or message.pinned or message.author.id == owner_id:
+            continue
+        if max_messages is not None and deleted_count + len(pending_messages) >= max_messages:
+            break
+
+        if message.created_at <= cutoff:
+            await delete_pending()
+            await message.delete()
+            deleted_count += 1
+        else:
+            pending_messages.append(message)
+            if len(pending_messages) == 100:
+                await delete_pending()
+
+    await delete_pending()
+    return deleted_count
+
+
+def bot_can_clear_channel(interaction: discord.Interaction) -> bool:
+    permissions = interaction.channel.permissions_for(interaction.guild.me)
+    return permissions.manage_messages and permissions.read_message_history
+
+
+def clear_permission_error_embed():
+    embed = discord.Embed(
+        title="Sin permisos",
+        description="El bot necesita `Manage Messages` y `Read Message History` en este canal.",
+        color=config.COLOR_EMBED,
+    )
+    embed.set_footer(text="NexusStore © Todos los derechos reservados")
+    return embed
+
+
+class FullClearConfirmView(discord.ui.View):
+    def __init__(self, requester_id: int, channel_id: int):
+        super().__init__(timeout=60)
+        self.requester_id = requester_id
+        self.channel_id = channel_id
+        self.message = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                "Solo quien inició este `/fullclear` puede confirmar la limpieza.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Borrar mensajes", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.channel_id != self.channel_id or not bot_can_clear_channel(interaction):
+            await interaction.response.send_message(embed=clear_permission_error_embed(), ephemeral=True)
+            return
+
+        await interaction.response.edit_message(
+            content="🧹 Limpiando el historial de este canal…",
+            embed=None,
+            view=None,
+        )
+        try:
+            deleted_count = await delete_channel_messages(
+                interaction.channel,
+                interaction.guild.owner_id,
+            )
+        except discord.Forbidden:
+            logger.exception(f"Permisos insuficientes durante /fullclear en #{interaction.channel.name}")
+            await interaction.followup.send(
+                "Discord no permitió completar la limpieza. Puede que algunos mensajes ya se hayan borrado.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException as error:
+            logger.exception(f"Error de Discord durante /fullclear en #{interaction.channel.name}: {error}")
+            await interaction.followup.send(
+                f"Discord detuvo la limpieza antes de terminar. Error: `{type(error).__name__}`.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            f"✅ Se eliminaron **{deleted_count} mensajes**. Se conservaron los mensajes fijados y los del dueño.",
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="Limpieza cancelada; no se borraron mensajes.",
+            embed=None,
+            view=None,
+        )
+
+    async def on_timeout(self):
+        if self.message is not None:
+            try:
+                await self.message.edit(
+                    content="La confirmación expiró; no se borraron mensajes.",
+                    embed=None,
+                    view=None,
+                )
+            except discord.HTTPException as error:
+                logger.warning(f"No pude actualizar la confirmación expirada de /fullclear: {error}")
+
+
+@bot.tree.command(name="clear", description="Elimina una cantidad de mensajes del canal actual")
+@app_commands.describe(cantidad="Cantidad de mensajes que quieres borrar (0-10000)")
+@has_co_admin_access()
+async def clear_messages(
+    interaction: discord.Interaction,
+    cantidad: app_commands.Range[int, 0, 10000],
+):
+    await interaction.response.defer(ephemeral=True)
+    if not bot_can_clear_channel(interaction):
+        await interaction.followup.send(embed=clear_permission_error_embed(), ephemeral=True)
+        return
+    if cantidad == 0:
+        await interaction.followup.send("No se borraron mensajes: la cantidad solicitada fue 0.", ephemeral=True)
+        return
+
+    try:
+        deleted_count = await delete_channel_messages(
+            interaction.channel,
+            interaction.guild.owner_id,
+            max_messages=cantidad,
+        )
+    except discord.Forbidden:
+        logger.exception(f"Permisos insuficientes durante /clear en #{interaction.channel.name}")
+        await interaction.followup.send(
+            "Discord no permitió completar la limpieza. Puede que algunos mensajes ya se hayan borrado.",
+            ephemeral=True,
+        )
+        return
+    except discord.HTTPException as error:
+        logger.exception(f"Error de Discord durante /clear en #{interaction.channel.name}: {error}")
+        await interaction.followup.send(
+            f"Discord detuvo la limpieza antes de terminar. Error: `{type(error).__name__}`.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.followup.send(
+        f"✅ Se eliminaron **{deleted_count} de {cantidad} mensajes solicitados**. "
+        "Se conservaron los mensajes fijados y los del dueño.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="fullclear", description="Solicita borrar todo el historial del canal actual")
+@has_co_admin_access()
+async def fullclear_messages(interaction: discord.Interaction):
+    if not bot_can_clear_channel(interaction):
+        await interaction.response.send_message(embed=clear_permission_error_embed(), ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="⚠️ Confirmar limpieza completa",
+        description=(
+            f"Esto eliminará todos los mensajes borrables del canal {interaction.channel.mention}, "
+            "incluidos los de más de 14 días. Los mensajes fijados y los del dueño se conservarán.\n\n"
+            "Esta acción no se puede deshacer."
+        ),
+        color=config.COLOR_EMBED,
+    )
+    view = FullClearConfirmView(interaction.user.id, interaction.channel_id)
+    await interaction.response.send_message(
+        embed=embed,
+        view=view,
+        ephemeral=True,
+    )
+    view.message = await interaction.original_response()
 
 @bot.tree.command(name="clear_user", description="Elimina mensajes de un usuario específico")
 @app_commands.describe(

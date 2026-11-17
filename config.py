@@ -63,6 +63,10 @@ DROP_CHANNEL_ID = None
 DROP_CHANNEL_NAME = "drops"
 TICKET_OPEN_CHANNEL_ID = 1509367067269136414  # Canal donde se abren tickets para reclamar un Drop
 
+# Encuestas
+SURVEY_STAFF_CHANNEL_ID = None
+SURVEY_STAFF_CHANNEL_NAME = "chat-admins"
+
 # Reputación (Nexus Reputation)
 REPUTATION_ENABLED = True
 REPUTATION_CHANNEL_ID = None
@@ -86,7 +90,7 @@ FAQ_COOLDOWN_SECONDS = 30
 FAQ_TOPICS = [
 	{
 		"key": "drops",
-		"keywords": ["drop", "drops", "dropeo", "el drop", "los drops", "funcionan los drops", "eso de los drops", "reclamar drop", "reclamar un drop"],
+		"keywords": ["como funciona eso de los drops", "como funcionan los drops", "dropeo", "el drop", "los drops", "funcionan los drops", "eso de los drops", "reclamar drop", "reclamar un drop"],
 		"message": """🎁 **¿Cómo funcionan los Drops?**
 
 Los **Drops** son recompensas que se publican en el servidor de **Nexus Stock**.
@@ -359,6 +363,9 @@ BAD_WORD_TIMEOUT_MINUTES = 10
 PROMOTION_FIRST_TIMEOUT_MINUTES = 5
 PROMOTION_SECOND_TIMEOUT_MINUTES = 10
 PROMOTION_WARNINGS_BEFORE_BAN = 4
+OWNER_MENTION_WINDOW_HOURS = 48
+OWNER_MENTION_TIMEOUTS_MINUTES = {3: 5, 4: 10, 5: 30}
+OWNER_MENTION_TIMEOUT_6_PLUS_MINUTES = 60
 
 # Conteo inicial de compradores; se resuelven a IDs reales del servidor al iniciar/consultar el top.
 INITIAL_PURCHASE_COUNTS = {
