@@ -4746,18 +4746,23 @@ class SurveyVotersButton(discord.ui.Button):
                 ephemeral=True,
             )
             return
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             survey = await get_survey(self.survey_id)
             if survey is None or survey["control_message_id"] != interaction.message.id:
-                await interaction.followup.send("Esta encuesta ya no está disponible.", ephemeral=True)
+                await interaction.edit_original_response(
+                    content="Esta encuesta ya no está disponible.",
+                    embed=None,
+                    view=None,
+                )
                 return
             voter_rows = await get_survey_voters(self.survey_id)
         except sqlite3.Error as error:
             logger.exception(f"No pude leer los votantes de la encuesta {self.survey_id}: {error}")
-            await interaction.followup.send(
-                "No pude leer los votantes; revisa los logs del bot.",
-                ephemeral=True,
+            await interaction.edit_original_response(
+                content="No pude leer los votantes; revisa los logs del bot.",
+                embed=None,
+                view=None,
             )
             return
 
@@ -4775,10 +4780,9 @@ class SurveyVotersButton(discord.ui.Button):
 
         embeds = build_survey_voter_embeds(survey, voter_rows)
         pages_view = SurveyVoterPagesView(embeds) if len(embeds) > 1 else None
-        await interaction.followup.send(
+        await interaction.edit_original_response(
             embed=embeds[0],
             view=pages_view,
-            ephemeral=True,
             allowed_mentions=discord.AllowedMentions.none(),
         )
 
@@ -5397,7 +5401,12 @@ async def voice_status(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # Comandos de Moderación
-async def delete_channel_messages(channel, owner_id: int, max_messages: Optional[int] = None) -> int:
+async def delete_channel_messages(
+    channel,
+    owner_id: int,
+    max_messages: Optional[int] = None,
+    preserve_owner: bool = True,
+) -> int:
     if max_messages == 0:
         return 0
 
@@ -5417,7 +5426,11 @@ async def delete_channel_messages(channel, owner_id: int, max_messages: Optional
             del pending_messages[:len(batch)]
 
     async for message in channel.history(limit=None):
-        if not message.type.is_deletable() or message.pinned or message.author.id == owner_id:
+        if (
+            not message.type.is_deletable()
+            or message.pinned
+            or (preserve_owner and message.author.id == owner_id)
+        ):
             continue
         if max_messages is not None and deleted_count + len(pending_messages) >= max_messages:
             break
@@ -5542,6 +5555,7 @@ async def clear_messages(
             interaction.channel,
             interaction.guild.owner_id,
             max_messages=cantidad,
+            preserve_owner=False,
         )
     except discord.Forbidden:
         logger.exception(f"Permisos insuficientes durante /clear en #{interaction.channel.name}")
@@ -5560,7 +5574,7 @@ async def clear_messages(
 
     await interaction.followup.send(
         f"✅ Se eliminaron **{deleted_count} de {cantidad} mensajes solicitados**. "
-        "Se conservaron los mensajes fijados y los del dueño.",
+        "Se conservaron los mensajes fijados; también se incluyeron los del dueño.",
         ephemeral=True,
     )
 

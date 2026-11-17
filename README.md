@@ -22,16 +22,17 @@ registros, no modifica los datos.
 
 El rol indicado por `CO_ADMIN_ROLE_NAME` puede usar los comandos slash y comandos
 administrativos de prefijo del bot desde cualquier canal, incluido `/vouch`.
-`/drop` sigue limitado a `#drops` y `/cerrar` solo funciona en tickets. La limpieza
-por comando excluye los mensajes del dueño. Los comandos de canal solo crean canales
-de texto o editan nombre/tema; no borran canales ni cambian sus permisos. Las
-restricciones propias de cada comando (por ejemplo, jerarquía de roles al moderar)
-se mantienen.
+`/drop` sigue limitado a `#drops` y `/cerrar` solo funciona en tickets. `/clear`
+incluye los mensajes del dueño; `/fullclear` los conserva. Los comandos de canal
+solo crean canales de texto o editan nombre/tema; no borran canales ni cambian sus
+permisos. Las restricciones propias de cada comando (por ejemplo, jerarquía de
+roles al moderar) se mantienen.
 
 `/clear` borra la cantidad indicada (de 0 a 10,000) del historial del canal actual.
 `/fullclear` solicita confirmación antes de borrar todo el historial borrable de ese
-canal, incluidos mensajes antiguos; ambos preservan mensajes fijados y los del dueño.
-El bot necesita `Manage Messages` y `Read Message History` en el canal.
+canal, incluidos mensajes antiguos. Ambos preservan mensajes fijados; `/clear`
+incluye los mensajes del dueño, mientras que `/fullclear` los conserva. El bot
+necesita `Manage Messages` y `Read Message History` en el canal.
 
 No concedas a ese rol `Administrator`, `Manage Messages`, `Manage Channels`,
 `Manage Server` ni `Manage Roles`: esos permisos de Discord permitirían saltarse las
