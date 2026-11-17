@@ -74,7 +74,9 @@ activas continúan después de reiniciar el proceso.
 El botón `FINALIZAR ENCUESTA` se publica en `#chat-admins`, que debe estar oculto
 a `@everyone` y accesible al Staff. El bot verifica además que quien lo use sea
 Staff autorizado. Este control va aparte para conservar las 25 opciones en el
-mensaje principal. La encuesta también finaliza automáticamente y publica
+mensaje principal. En ese mismo control, `VOTANTES` muestra de forma privada los
+nombres de quienes votaron, agrupados por opción; si la lista es larga, aparece
+paginada. La encuesta también finaliza automáticamente y publica
 porcentajes, conteos y ganadores o empate. El formulario de imagen requiere
 `discord.py` 2.7 o superior.
 

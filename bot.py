@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import re
+
 import contextlib
 import time
 import typing
@@ -487,10 +488,19 @@ async def initialize_survey_store():
                     survey_id TEXT NOT NULL REFERENCES surveys(survey_id) ON DELETE CASCADE,
                     user_id INTEGER NOT NULL,
                     option_index INTEGER NOT NULL,
+                    voter_name TEXT NOT NULL DEFAULT 'Usuario no disponible',
                     PRIMARY KEY (survey_id, user_id)
                 )
                 """
             )
+            vote_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(survey_votes)")
+            }
+            if "voter_name" not in vote_columns:
+                connection.execute(
+                    "ALTER TABLE survey_votes ADD COLUMN voter_name TEXT NOT NULL "
+                    "DEFAULT 'Usuario no disponible'"
+                )
             connection.execute("DELETE FROM surveys WHERE message_id IS NULL")
 
     await asyncio.to_thread(initialize)
@@ -579,11 +589,42 @@ async def get_survey(survey_id):
     return await asyncio.to_thread(_get_survey_sync, survey_id)
 
 
+async def get_survey_voters(survey_id):
+    def read():
+        with survey_db_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT user_id, option_index, voter_name
+                FROM survey_votes
+                WHERE survey_id = ?
+                ORDER BY option_index, voter_name COLLATE NOCASE
+                """,
+                (survey_id,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    return await asyncio.to_thread(read)
+
+
 async def list_active_surveys():
     def read():
         with survey_db_connection() as connection:
             rows = connection.execute(
                 "SELECT * FROM surveys WHERE ended = 0 AND message_id IS NOT NULL"
+            ).fetchall()
+            return [_survey_from_row(connection, row) for row in rows]
+
+    return await asyncio.to_thread(read)
+
+
+async def list_survey_controls():
+    def read():
+        with survey_db_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM surveys
+                WHERE control_message_id IS NOT NULL AND message_id IS NOT NULL
+                """
             ).fetchall()
             return [_survey_from_row(connection, row) for row in rows]
 
@@ -612,7 +653,7 @@ async def mark_survey_result_announced(survey_id):
     await asyncio.to_thread(update)
 
 
-async def cast_survey_vote(survey_id, user_id, option_index):
+async def cast_survey_vote(survey_id, user_id, option_index, voter_name="Usuario no disponible"):
     def vote():
         with survey_db_connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -635,15 +676,21 @@ async def cast_survey_vote(survey_id, user_id, option_index):
                 (survey_id, user_id),
             ).fetchone()
             if previous is not None and previous["option_index"] == option_index:
+                connection.execute(
+                    "UPDATE survey_votes SET voter_name = ? WHERE survey_id = ? AND user_id = ?",
+                    (voter_name, survey_id, user_id),
+                )
                 return "unchanged", _survey_from_row(connection, row)
             connection.execute(
                 """
-                INSERT INTO survey_votes (survey_id, user_id, option_index)
-                VALUES (?, ?, ?)
+                INSERT INTO survey_votes (survey_id, user_id, option_index, voter_name)
+                VALUES (?, ?, ?, ?)
                 ON CONFLICT (survey_id, user_id)
-                DO UPDATE SET option_index = excluded.option_index
+                DO UPDATE SET
+                    option_index = excluded.option_index,
+                    voter_name = excluded.voter_name
                 """,
-                (survey_id, user_id, option_index),
+                (survey_id, user_id, option_index, voter_name),
             )
             updated = connection.execute(
                 "SELECT * FROM surveys WHERE survey_id = ?",
@@ -4415,7 +4462,7 @@ def survey_progress_bar(votes: int, total_votes: int, width: int = 12) -> str:
 def build_survey_embed(survey):
     ended = survey["ended"]
     status = "🔒 **FINALIZADA**" if ended else "🟢 **ACTIVA**"
-    description = f"{status}\n\n**{survey['question'].upper()}**"
+    description = f"\u200b\n{status}\n\n**{survey['question'].upper()}**"
     if ended:
         highest = max(survey["counts"], default=0)
         if highest == 0:
@@ -4506,6 +4553,53 @@ def build_survey_results_embed(survey):
     return embed
 
 
+def build_survey_voter_embeds(survey, voter_rows):
+    voters_by_option = [[] for _ in survey["options"]]
+    for row in voter_rows:
+        option_index = row["option_index"]
+        if 0 <= option_index < len(voters_by_option):
+            name = row["voter_name"] or "Usuario no disponible"
+            voters_by_option[option_index].append(name)
+
+    lines = []
+    for option_index, option in enumerate(survey["options"]):
+        names = voters_by_option[option_index]
+        lines.append(
+            f"**{discord.utils.escape_markdown(option)}** — "
+            f"{len(names)} {'voto' if len(names) == 1 else 'votos'}"
+        )
+        if names:
+            lines.extend(f"• {discord.utils.escape_markdown(name)}" for name in names)
+        else:
+            lines.append("• Sin votos todavía")
+        lines.append("")
+
+    pages = []
+    page_text = ""
+    for line in lines:
+        candidate = f"{page_text}{line}\n"
+        if page_text and len(candidate) > 3500:
+            pages.append(page_text.rstrip())
+            page_text = f"{line}\n"
+        else:
+            page_text = candidate
+    if page_text:
+        pages.append(page_text.rstrip())
+
+    title = f"👥 VOTANTES · {survey['question'][:220]}"
+    total_voters = len(voter_rows)
+    return [
+        discord.Embed(
+            title=title,
+            description=page,
+            color=SURVEY_RED,
+        ).set_footer(
+            text=f"Página {page_number}/{len(pages)} · {total_voters} votantes"
+        )
+        for page_number, page in enumerate(pages, start=1)
+    ]
+
+
 class SurveyVoteButton(discord.ui.Button):
     def __init__(self, survey_id: str, option_index: int, option: str):
         super().__init__(
@@ -4520,11 +4614,17 @@ class SurveyVoteButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
+        voter_name = (
+            getattr(interaction.user, "display_name", None)
+            or getattr(interaction.user, "global_name", None)
+            or interaction.user.name
+        )
         try:
             status, survey = await cast_survey_vote(
                 self.survey_id,
                 interaction.user.id,
                 self.option_index,
+                voter_name,
             )
         except sqlite3.Error as error:
             logger.exception(f"SQLite rechazó el voto de la encuesta {self.survey_id}: {error}")
@@ -4629,12 +4729,97 @@ class SurveyFinishButton(discord.ui.Button):
         await interaction.followup.send("✅ Encuesta finalizada y resultados publicados.", ephemeral=True)
 
 
+class SurveyVotersButton(discord.ui.Button):
+    def __init__(self, survey_id: str):
+        super().__init__(
+            label="VOTANTES",
+            style=discord.ButtonStyle.primary,
+            emoji="👥",
+            custom_id=f"nexus_survey_voters:{survey_id}",
+        )
+        self.survey_id = survey_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.guild is None or not can_manage_drop(interaction.user):
+            await interaction.response.send_message(
+                "❌ Solo el Staff autorizado puede ver los votantes.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            survey = await get_survey(self.survey_id)
+            if survey is None or survey["control_message_id"] != interaction.message.id:
+                await interaction.followup.send("Esta encuesta ya no está disponible.", ephemeral=True)
+                return
+            voter_rows = await get_survey_voters(self.survey_id)
+        except sqlite3.Error as error:
+            logger.exception(f"No pude leer los votantes de la encuesta {self.survey_id}: {error}")
+            await interaction.followup.send(
+                "No pude leer los votantes; revisa los logs del bot.",
+                ephemeral=True,
+            )
+            return
+
+        for voter in voter_rows:
+            if voter["voter_name"] != "Usuario no disponible":
+                continue
+            member = interaction.guild.get_member(voter["user_id"])
+            user = member or bot.get_user(voter["user_id"])
+            if user is not None:
+                voter["voter_name"] = (
+                    getattr(user, "display_name", None)
+                    or getattr(user, "global_name", None)
+                    or user.name
+                )
+
+        embeds = build_survey_voter_embeds(survey, voter_rows)
+        pages_view = SurveyVoterPagesView(embeds) if len(embeds) > 1 else None
+        await interaction.followup.send(
+            embed=embeds[0],
+            view=pages_view,
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
+class SurveyVoterPagesView(discord.ui.View):
+    def __init__(self, embeds):
+        super().__init__(timeout=180)
+        self.embeds = embeds
+        self.page_index = 0
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.previous_page.disabled = self.page_index == 0
+        self.next_page.disabled = self.page_index >= len(self.embeds) - 1
+
+    @discord.ui.button(label="Anterior", style=discord.ButtonStyle.secondary, emoji="◀️")
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page_index -= 1
+        self.update_buttons()
+        await interaction.response.edit_message(
+            embed=self.embeds[self.page_index],
+            view=self,
+        )
+
+    @discord.ui.button(label="Siguiente", style=discord.ButtonStyle.secondary, emoji="▶️")
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page_index += 1
+        self.update_buttons()
+        await interaction.response.edit_message(
+            embed=self.embeds[self.page_index],
+            view=self,
+        )
+
+
 class SurveyControlView(discord.ui.View):
     def __init__(self, survey_id: str, ended: bool = False):
         super().__init__(timeout=None)
         button = SurveyFinishButton(survey_id)
         button.disabled = ended
         self.add_item(button)
+        self.add_item(SurveyVotersButton(survey_id))
 
 
 async def publish_survey_result(survey_id: str):
@@ -4677,10 +4862,29 @@ async def restore_active_survey_views():
     for survey in await list_active_surveys():
         if survey["message_id"] is not None:
             bot.add_view(SurveyView(survey), message_id=survey["message_id"])
-        if survey["control_message_id"] is not None:
-            bot.add_view(
-                SurveyControlView(survey["survey_id"]),
-                message_id=survey["control_message_id"],
+
+    for survey in await list_survey_controls():
+        control_view = SurveyControlView(survey["survey_id"], ended=survey["ended"])
+        bot.add_view(control_view, message_id=survey["control_message_id"])
+        try:
+            control_channel_id = survey["control_channel_id"] or survey["channel_id"]
+            control_channel = bot.get_channel(control_channel_id)
+            if control_channel is None:
+                control_channel = await bot.fetch_channel(control_channel_id)
+            control_message = await control_channel.fetch_message(survey["control_message_id"])
+            voter_custom_id = f"nexus_survey_voters:{survey['survey_id']}"
+            existing_custom_ids = {
+                component.custom_id
+                for row in control_message.components
+                for component in row.children
+            }
+            if voter_custom_id not in existing_custom_ids:
+                await control_message.edit(view=control_view)
+        except discord.NotFound:
+            logger.info(f"El mensaje de control de la encuesta {survey['survey_id']} ya no existe")
+        except discord.HTTPException:
+            logger.exception(
+                f"No pude actualizar el control de Staff de la encuesta {survey['survey_id']}"
             )
 
     for survey in await list_pending_survey_results():
