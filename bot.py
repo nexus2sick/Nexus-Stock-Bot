@@ -5498,6 +5498,25 @@ class SurveyCreationModal(discord.ui.Modal):
             )
             return
 
+        expected_filenames = {chart_file.filename}
+        if image_file is not None:
+            expected_filenames.add(image_file.filename)
+        received_filenames = {
+            attachment.filename for attachment in poll_message.attachments
+        }
+        missing_filenames = expected_filenames - received_filenames
+        if missing_filenames:
+            try:
+                poll_message = await interaction.channel.fetch_message(poll_message.id)
+            except discord.HTTPException:
+                logger.exception(
+                    f"No pude volver a consultar los adjuntos de la encuesta {survey['survey_id']}"
+                )
+            received_filenames = {
+                attachment.filename for attachment in poll_message.attachments
+            }
+            missing_filenames = expected_filenames - received_filenames
+
         image_attachment = next(
             (
                 attachment
@@ -5506,22 +5525,19 @@ class SurveyCreationModal(discord.ui.Modal):
             ),
             None,
         )
-        chart_attachment = next(
-            (
-                attachment
-                for attachment in poll_message.attachments
-                if attachment.filename == chart_file.filename
-            ),
-            None,
-        )
-        if chart_attachment is None or (image_file is not None and image_attachment is None):
+        if missing_filenames:
+            logger.error(
+                f"Discord no confirmó los adjuntos de la encuesta {survey['survey_id']}. "
+                f"Faltan: {sorted(missing_filenames)}; recibidos: {sorted(received_filenames)}"
+            )
             await delete_survey_record(survey["survey_id"])
             try:
                 await poll_message.delete()
             except discord.HTTPException as error:
                 logger.error(f"No pude retirar la encuesta sin adjunto {poll_message.id}: {error}")
             await interaction.followup.send(
-                "Discord no confirmó todos los gráficos o imágenes, así que no activé la encuesta.",
+                "Discord no confirmó el gráfico o la imagen adjunta, así que no activé la encuesta. "
+                "Revisa los registros del bot para ver cuál archivo faltó.",
                 ephemeral=True,
             )
             return
