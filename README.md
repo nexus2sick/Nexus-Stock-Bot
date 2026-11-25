@@ -67,8 +67,12 @@ usa `drops.json`.
 ## Encuestas Nexus Stock
 
 `/encuesta` abre un formulario para Staff con pregunta, opciones (una por línea,
-de 2 a 25), duración e imagen opcional. Cada opción tiene su botón rojo; un voto
-nuevo reemplaza el anterior. Los resultados y cambios de voto se guardan en
+de 2 a 25), duración e imagen opcional. El embed muestra el conteo y el porcentaje
+por opción con barras de progreso; conserva la barra lateral roja, pero las opciones
+usan botones grises. Un voto nuevo reemplaza el anterior. Tras votar, el usuario
+recibe una confirmación privada con `Eliminar mi voto`; así puede retirar su voto
+sin mostrar un botón de eliminación a quienes no han votado. Los resultados y
+cambios de voto se guardan en
 `surveys.sqlite3` (o en la ruta indicada por `SURVEYS_DB_PATH`) y las encuestas
 activas continúan después de reiniciar el proceso.
 

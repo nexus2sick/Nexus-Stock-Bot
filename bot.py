@@ -297,7 +297,6 @@ drop_store_lock = asyncio.Lock()
 drop_publish_lock = asyncio.Lock()
 SURVEYS_DB_PATH = os.getenv("SURVEYS_DB_PATH", "surveys.sqlite3")
 SURVEY_RED = 0xDC2626
-SURVEY_DARK_RED = 0x7F1D1D
 SURVEY_SILVER = 0xC0C0C0
 survey_publish_lock = asyncio.Lock()
 OWNER_MENTION_DB_PATH = os.getenv("OWNER_MENTION_DB_PATH", "owner_mentions.sqlite3")
@@ -699,6 +698,34 @@ async def cast_survey_vote(survey_id, user_id, option_index, voter_name="Usuario
             return ("updated" if previous else "voted"), _survey_from_row(connection, updated)
 
     return await asyncio.to_thread(vote)
+
+
+async def remove_survey_vote(survey_id, user_id):
+    def remove():
+        with survey_db_connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM surveys WHERE survey_id = ?",
+                (survey_id,),
+            ).fetchone()
+            if row is None:
+                return "missing", None
+            if row["ended"]:
+                return "ended", _survey_from_row(connection, row)
+            if row["end_time"] <= discord.utils.utcnow().timestamp():
+                return "expired", _survey_from_row(connection, row)
+
+            cursor = connection.execute(
+                "DELETE FROM survey_votes WHERE survey_id = ? AND user_id = ?",
+                (survey_id, user_id),
+            )
+            updated = connection.execute(
+                "SELECT * FROM surveys WHERE survey_id = ?",
+                (survey_id,),
+            ).fetchone()
+            return ("removed" if cursor.rowcount else "no_vote"), _survey_from_row(connection, updated)
+
+    return await asyncio.to_thread(remove)
 
 
 async def finish_survey(survey_id):
@@ -4456,7 +4483,7 @@ def format_vote_duration(seconds: int) -> str:
 def survey_progress_bar(votes: int, total_votes: int, width: int = 12) -> str:
     ratio = votes / total_votes if total_votes else 0
     filled = round(ratio * width)
-    return f"`{'█' * filled}{'░' * (width - filled)}`"
+    return f"`{'▰' * filled}{'▱' * (width - filled)}`"
 
 
 def build_survey_embed(survey):
@@ -4480,10 +4507,14 @@ def build_survey_embed(survey):
     else:
         description += "\n\n📊 Vota pulsando el botón de tu opción."
 
+    description += f"\n\n👥 **Total de votos: {survey['total_votes']}**"
+    if not ended:
+        description += f"\n⏳ **Finaliza:** <t:{int(survey['end_time'])}:R>"
+
     embed = discord.Embed(
         title="🔴 NEXUS STOCK • 📊 ENCUESTA DEL STOCK",
         description=description,
-        color=SURVEY_RED if not ended else SURVEY_DARK_RED,
+        color=SURVEY_RED,
     )
     order = list(range(len(survey["options"])))
     if ended:
@@ -4491,20 +4522,16 @@ def build_survey_embed(survey):
     for rank, index in enumerate(order):
         votes = survey["counts"][index]
         percentage = (votes / survey["total_votes"] * 100) if survey["total_votes"] else 0
-        rank_prefix = f"{rank + 1}. " if ended else "🔴 "
+        option = discord.utils.escape_markdown(survey["options"][index])
         embed.add_field(
-            name=f"{rank_prefix}{survey['options'][index]}",
-            value=f"**{votes} votos** · **{percentage:.1f}%**\n{survey_progress_bar(votes, survey['total_votes'])}",
+            name=f"{rank + 1}. {option}",
+            value=(
+                f"**{votes} votos** │ **{percentage:.1f}%**\n"
+                f"{survey_progress_bar(votes, survey['total_votes'])}"
+            ),
             inline=False,
         )
 
-    embed.add_field(name="👥 Total de votos", value=str(survey["total_votes"]), inline=True)
-    if not ended:
-        embed.add_field(
-            name="⏳ Finaliza",
-            value=f"<t:{int(survey['end_time'])}:R>",
-            inline=True,
-        )
     embed.set_footer(text="NEXUS STOCK © — LA COMUNIDAD DECIDE", icon_url=None)
     if survey["image_url"]:
         embed.set_image(url=survey["image_url"])
@@ -4515,7 +4542,10 @@ def build_survey_embed(survey):
 def build_survey_results_embed(survey):
     embed = discord.Embed(
         title="🏆 RESULTADOS FINALES — NEXUS STOCK",
-        description="La comunidad de Nexus Stock ha decidido.",
+        description=(
+            "La comunidad de Nexus Stock ha decidido.\n\n"
+            f"👥 **Total de votos: {survey['total_votes']}**"
+        ),
         color=SURVEY_SILVER,
     )
     order = sorted(
@@ -4546,8 +4576,7 @@ def build_survey_results_embed(survey):
         result = f"👑 **OPCIÓN GANADORA: {winners[0]}**"
     else:
         result = f"🤝 **EMPATE ENTRE:** {' · '.join(winners)}"
-    embed.add_field(name="🏆 Resultado", value=result, inline=False)
-    embed.add_field(name="👥 Total de votos", value=str(survey["total_votes"]), inline=False)
+    embed.description += f"\n\n🏆 {result}"
     embed.set_footer(text="NEXUS STOCK © — LA COMUNIDAD DECIDE")
     embed.timestamp = discord.utils.utcnow()
     return embed
@@ -4604,8 +4633,8 @@ class SurveyVoteButton(discord.ui.Button):
     def __init__(self, survey_id: str, option_index: int, option: str):
         super().__init__(
             label=option,
-            style=discord.ButtonStyle.danger,
-            emoji="🔴",
+            style=discord.ButtonStyle.secondary,
+            emoji="☑️",
             row=option_index // 5,
             custom_id=f"nexus_survey_vote:{survey_id}:{option_index}",
         )
@@ -4613,7 +4642,7 @@ class SurveyVoteButton(discord.ui.Button):
         self.option_index = option_index
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
         voter_name = (
             getattr(interaction.user, "display_name", None)
             or getattr(interaction.user, "global_name", None)
@@ -4628,43 +4657,50 @@ class SurveyVoteButton(discord.ui.Button):
             )
         except sqlite3.Error as error:
             logger.exception(f"SQLite rechazó el voto de la encuesta {self.survey_id}: {error}")
-            await interaction.followup.send(
-                "No pude guardar tu voto. Inténtalo de nuevo.",
-                ephemeral=True,
+            await interaction.edit_original_response(
+                content="No pude guardar tu voto. Inténtalo de nuevo.",
+                view=None,
             )
             return
 
         if status == "missing":
-            await interaction.followup.send("Esta encuesta ya no existe.", ephemeral=True)
+            await interaction.edit_original_response(content="Esta encuesta ya no existe.", view=None)
             return
         if status in {"ended", "expired"}:
             if status == "expired":
                 await finish_survey(self.survey_id)
-            await interaction.followup.send("Esta encuesta ya finalizó.", ephemeral=True)
+            await interaction.edit_original_response(content="Esta encuesta ya finalizó.", view=None)
             return
         if status == "invalid_option":
-            await interaction.followup.send("Esa opción no pertenece a esta encuesta.", ephemeral=True)
-            return
-        if status == "unchanged":
-            await interaction.followup.send("Tu voto ya está registrado en esa opción.", ephemeral=True)
-            return
-
-        try:
-            await interaction.message.edit(embed=build_survey_embed(survey))
-        except discord.HTTPException as error:
-            logger.exception(f"No pude actualizar el embed de la encuesta {self.survey_id}: {error}")
-            await interaction.followup.send(
-                "Tu voto quedó registrado, pero no pude actualizar el contador en el embed.",
-                ephemeral=True,
+            await interaction.edit_original_response(
+                content="Esa opción no pertenece a esta encuesta.",
+                view=None,
             )
             return
+        if status == "unchanged":
+            response = "Tu voto ya está registrado en esa opción."
 
-        response = (
-            f"✅ Tu voto fue actualizado a **{survey['options'][self.option_index]}**."
-            if status == "updated"
-            else f"✅ Tu voto por **{survey['options'][self.option_index]}** quedó registrado."
+        if status != "unchanged":
+            try:
+                await interaction.message.edit(embed=build_survey_embed(survey))
+            except discord.HTTPException as error:
+                logger.exception(f"No pude actualizar el embed de la encuesta {self.survey_id}: {error}")
+                await interaction.edit_original_response(
+                    content="Tu voto quedó registrado, pero no pude actualizar el contador en el embed.",
+                    view=SurveyPersonalVoteView(self.survey_id),
+                )
+                return
+
+        if status != "unchanged":
+            response = (
+                f"✅ Tu voto fue actualizado a **{survey['options'][self.option_index]}**."
+                if status == "updated"
+                else f"✅ Tu voto por **{survey['options'][self.option_index]}** quedó registrado."
+            )
+        await interaction.edit_original_response(
+            content=response,
+            view=SurveyPersonalVoteView(self.survey_id),
         )
-        await interaction.followup.send(response, ephemeral=True)
 
 
 class SurveyView(discord.ui.View):
@@ -4675,6 +4711,60 @@ class SurveyView(discord.ui.View):
         if survey["ended"]:
             for item in self.children:
                 item.disabled = True
+
+
+class SurveyRemoveVoteButton(discord.ui.Button):
+    def __init__(self, survey_id: str):
+        super().__init__(
+            label="Eliminar mi voto",
+            style=discord.ButtonStyle.danger,
+            emoji="🗑️",
+            custom_id=f"nexus_survey_remove_vote:{survey_id}",
+        )
+        self.survey_id = survey_id
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            status, survey = await remove_survey_vote(self.survey_id, interaction.user.id)
+        except sqlite3.Error as error:
+            logger.exception(f"No pude eliminar el voto de la encuesta {self.survey_id}: {error}")
+            await interaction.edit_original_response(
+                content="No pude eliminar tu voto; revisa los logs del bot.",
+                view=None,
+            )
+            return
+
+        if status == "missing":
+            response = "Esta encuesta ya no existe."
+        elif status in {"ended", "expired"}:
+            if status == "expired":
+                await finish_survey(self.survey_id)
+            response = "La encuesta ya finalizó; ya no se pueden cambiar los votos."
+        elif status == "no_vote":
+            response = "No tienes un voto activo que eliminar en esta encuesta."
+        else:
+            try:
+                channel = bot.get_channel(survey["channel_id"])
+                if channel is None:
+                    channel = await bot.fetch_channel(survey["channel_id"])
+                poll_message = await channel.fetch_message(survey["message_id"])
+                await poll_message.edit(embed=build_survey_embed(survey))
+            except discord.HTTPException as error:
+                logger.exception(
+                    f"Voto eliminado, pero no pude actualizar el embed de la encuesta {self.survey_id}: {error}"
+                )
+                response = "Tu voto se eliminó, pero no pude actualizar los resultados visibles."
+            else:
+                response = "✅ Eliminé tu voto."
+
+        await interaction.edit_original_response(content=response, view=None)
+
+
+class SurveyPersonalVoteView(discord.ui.View):
+    def __init__(self, survey_id: str):
+        super().__init__(timeout=900)
+        self.add_item(SurveyRemoveVoteButton(survey_id))
 
 
 class SurveyFinishButton(discord.ui.Button):
