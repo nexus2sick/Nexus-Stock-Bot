@@ -5526,23 +5526,13 @@ class SurveyCreationModal(discord.ui.Modal):
             None,
         )
         if missing_filenames:
-            logger.error(
-                f"Discord no confirmó los adjuntos de la encuesta {survey['survey_id']}. "
-                f"Faltan: {sorted(missing_filenames)}; recibidos: {sorted(received_filenames)}"
+            logger.warning(
+                f"No pude verificar todos los adjuntos de la encuesta {survey['survey_id']}. "
+                f"Faltan: {sorted(missing_filenames)}; recibidos: {sorted(received_filenames)}. "
+                "El envío del mensaje sí se completó; continuaré activando la encuesta."
             )
-            await delete_survey_record(survey["survey_id"])
-            try:
-                await poll_message.delete()
-            except discord.HTTPException as error:
-                logger.error(f"No pude retirar la encuesta sin adjunto {poll_message.id}: {error}")
-            await interaction.followup.send(
-                "Discord no confirmó el gráfico o la imagen adjunta, así que no activé la encuesta. "
-                "Revisa los registros del bot para ver cuál archivo faltó.",
-                ephemeral=True,
-            )
-            return
 
-        public_image_url = image_attachment.url if image_attachment else None
+        public_image_url = image_attachment.url if image_attachment else image_url
         try:
             await set_survey_message(survey["survey_id"], poll_message.id, public_image_url)
             survey["message_id"] = poll_message.id
