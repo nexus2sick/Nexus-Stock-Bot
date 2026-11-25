@@ -17,9 +17,11 @@ from aiohttp import web
 import json
 import sqlite3
 import uuid
+import io
 from datetime import datetime, timedelta
 import pytz
 import random
+from PIL import Image, ImageDraw, ImageFont
 
 def has_admin_role():
     """Permite estos comandos al dueño o al rol coadministrador."""
@@ -680,6 +682,7 @@ async def cast_survey_vote(survey_id, user_id, option_index, voter_name="Usuario
                     (voter_name, survey_id, user_id),
                 )
                 return "unchanged", _survey_from_row(connection, row)
+            previous_counts = _survey_from_row(connection, row)["counts"]
             connection.execute(
                 """
                 INSERT INTO survey_votes (survey_id, user_id, option_index, voter_name)
@@ -695,7 +698,9 @@ async def cast_survey_vote(survey_id, user_id, option_index, voter_name="Usuario
                 "SELECT * FROM surveys WHERE survey_id = ?",
                 (survey_id,),
             ).fetchone()
-            return ("updated" if previous else "voted"), _survey_from_row(connection, updated)
+            updated_survey = _survey_from_row(connection, updated)
+            updated_survey["previous_counts"] = previous_counts
+            return ("updated" if previous else "voted"), updated_survey
 
     return await asyncio.to_thread(vote)
 
@@ -715,6 +720,7 @@ async def remove_survey_vote(survey_id, user_id):
             if row["end_time"] <= discord.utils.utcnow().timestamp():
                 return "expired", _survey_from_row(connection, row)
 
+            previous_counts = _survey_from_row(connection, row)["counts"]
             cursor = connection.execute(
                 "DELETE FROM survey_votes WHERE survey_id = ? AND user_id = ?",
                 (survey_id, user_id),
@@ -723,9 +729,42 @@ async def remove_survey_vote(survey_id, user_id):
                 "SELECT * FROM surveys WHERE survey_id = ?",
                 (survey_id,),
             ).fetchone()
-            return ("removed" if cursor.rowcount else "no_vote"), _survey_from_row(connection, updated)
+            updated_survey = _survey_from_row(connection, updated)
+            updated_survey["previous_counts"] = previous_counts
+            return ("removed" if cursor.rowcount else "no_vote"), updated_survey
 
     return await asyncio.to_thread(remove)
+
+
+async def reset_survey_votes(survey_id):
+    def reset():
+        with survey_db_connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM surveys WHERE survey_id = ?",
+                (survey_id,),
+            ).fetchone()
+            if row is None:
+                return "missing", None
+            if row["ended"]:
+                return "ended", _survey_from_row(connection, row)
+            if row["end_time"] <= discord.utils.utcnow().timestamp():
+                return "expired", _survey_from_row(connection, row)
+
+            previous_counts = _survey_from_row(connection, row)["counts"]
+            cursor = connection.execute(
+                "DELETE FROM survey_votes WHERE survey_id = ?",
+                (survey_id,),
+            )
+            updated = connection.execute(
+                "SELECT * FROM surveys WHERE survey_id = ?",
+                (survey_id,),
+            ).fetchone()
+            updated_survey = _survey_from_row(connection, updated)
+            updated_survey["previous_counts"] = previous_counts
+            return "reset", (updated_survey, cursor.rowcount)
+
+    return await asyncio.to_thread(reset)
 
 
 async def finish_survey(survey_id):
@@ -4480,10 +4519,182 @@ def format_vote_duration(seconds: int) -> str:
     return f"{seconds}s"
 
 
-def survey_progress_bar(votes: int, total_votes: int, width: int = 12) -> str:
-    ratio = votes / total_votes if total_votes else 0
-    filled = round(ratio * width)
-    return f"`{'▰' * filled}{'▱' * (width - filled)}`"
+def survey_chart_filename(survey_id):
+    return f"survey-{survey_id}-progress.gif"
+
+
+def build_survey_chart_embed(survey):
+    embed = discord.Embed()
+    embed.set_image(url=f"attachment://{survey_chart_filename(survey['survey_id'])}")
+    return embed
+
+
+def _survey_font(size, bold=False):
+    font_paths = (
+        (r"C:\Windows\Fonts\arialbd.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf")
+        if bold
+        else (r"C:\Windows\Fonts\arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+    )
+    for path in font_paths:
+        if os.path.isfile(path):
+            try:
+                return ImageFont.truetype(path, size=size)
+            except OSError:
+                continue
+    return ImageFont.load_default()
+
+
+def render_survey_chart(survey, previous_counts=None):
+    width = 760
+    side_padding = 24
+    row_height = 48
+    bar_height = 12
+    top_padding = 18
+    height = top_padding * 2 + max(1, len(survey["options"])) * row_height
+    background = (43, 45, 49)
+    track_color = (64, 66, 73)
+    gradient_start = (127, 29, 29)
+    gradient_end = (220, 38, 38)
+
+    label_font = _survey_font(18, bold=True)
+    stat_font = _survey_font(16)
+    bar_width = width - side_padding * 2
+    gradient = Image.new("RGB", (bar_width, bar_height))
+    gradient_draw = ImageDraw.Draw(gradient)
+    for x in range(bar_width):
+        ratio = x / max(1, bar_width - 1)
+        color = tuple(
+            round(start + (end - start) * ratio)
+            for start, end in zip(gradient_start, gradient_end)
+        )
+        gradient_draw.line((x, 0, x, bar_height), fill=color)
+
+    target_ratios = [
+        count / survey["total_votes"] if survey["total_votes"] else 0
+        for count in survey["counts"]
+    ]
+    if previous_counts is None or survey["ended"]:
+        previous_ratios = target_ratios
+    else:
+        previous_total = sum(previous_counts)
+        previous_ratios = [
+            count / previous_total if previous_total else 0
+            for count in previous_counts
+        ]
+    animate = (
+        previous_counts is not None
+        and not survey["ended"]
+        and previous_counts != survey["counts"]
+    )
+    frame_count = 10 if animate else 1
+    frames = []
+
+    for frame_index in range(frame_count):
+        frame = Image.new("RGB", (width, height), background)
+        draw = ImageDraw.Draw(frame)
+        progress = (frame_index + 1) / frame_count
+        eased = 1 - (1 - progress) ** 3
+
+        for index, option in enumerate(survey["options"]):
+            y = top_padding + index * row_height
+            votes = survey["counts"][index]
+            percentage = target_ratios[index] * 100
+            label = f"{index + 1}. {option}"
+            stats = f"{votes} {'votos' if votes != 1 else 'voto'}  |  {percentage:.1f}%"
+            stats_width = draw.textlength(stats, font=stat_font)
+            max_label_width = width - side_padding * 2 - stats_width - 20
+            while label and draw.textlength(label, font=label_font) > max_label_width:
+                label = label[:-2].rstrip() + "…"
+
+            draw.text(
+                (side_padding, y),
+                label,
+                fill=(239, 239, 242),
+                font=label_font,
+            )
+            draw.text(
+                (width - side_padding - stats_width, y + 1),
+                stats,
+                fill=(198, 199, 204),
+                font=stat_font,
+            )
+
+            bar_y = y + 27
+            draw.rounded_rectangle(
+                (
+                    side_padding,
+                    bar_y,
+                    width - side_padding,
+                    bar_y + bar_height,
+                ),
+                radius=bar_height // 2,
+                fill=track_color,
+            )
+            ratio = previous_ratios[index] + (
+                target_ratios[index] - previous_ratios[index]
+            ) * eased
+            fill_width = round(bar_width * ratio)
+            if fill_width > 0:
+                mask = Image.new("L", (bar_width, bar_height), 0)
+                mask_draw = ImageDraw.Draw(mask)
+                mask_draw.rounded_rectangle(
+                    (0, 0, min(fill_width, bar_width), bar_height - 1),
+                    radius=bar_height // 2,
+                    fill=255,
+                )
+                frame.paste(gradient, (side_padding, bar_y), mask)
+
+        frames.append(frame)
+
+    output = io.BytesIO()
+    durations = [55] * (len(frames) - 1) + [3000]
+    duration = durations if len(frames) > 1 else durations[0]
+    frames[0].save(
+        output,
+        format="GIF",
+        save_all=len(frames) > 1,
+        append_images=frames[1:],
+        duration=duration,
+        disposal=2,
+        optimize=False,
+    )
+    output.seek(0)
+    return output
+
+
+async def create_survey_chart_file(survey, previous_counts=None):
+    chart_bytes = await asyncio.to_thread(render_survey_chart, survey, previous_counts)
+    return discord.File(
+        chart_bytes,
+        filename=survey_chart_filename(survey["survey_id"]),
+    )
+
+
+def build_survey_message_embeds(survey):
+    return [build_survey_embed(survey), build_survey_chart_embed(survey)]
+
+
+async def update_survey_message(survey, message=None, previous_counts=None, view=None):
+    channel = bot.get_channel(survey["channel_id"])
+    if channel is None:
+        channel = await bot.fetch_channel(survey["channel_id"])
+    if message is None:
+        message = await channel.fetch_message(survey["message_id"])
+
+    chart_file = await create_survey_chart_file(survey, previous_counts)
+    chart_filename = survey_chart_filename(survey["survey_id"])
+    attachments = [
+        attachment
+        for attachment in message.attachments
+        if attachment.filename != chart_filename
+    ]
+    edit_options = {
+        "embeds": build_survey_message_embeds(survey),
+        "attachments": [*attachments, chart_file],
+    }
+    if view is not None:
+        edit_options["view"] = view
+    await message.edit(**edit_options)
 
 
 def build_survey_embed(survey):
@@ -4525,10 +4736,7 @@ def build_survey_embed(survey):
         option = discord.utils.escape_markdown(survey["options"][index])
         embed.add_field(
             name=f"{rank + 1}. {option}",
-            value=(
-                f"**{votes} votos** │ **{percentage:.1f}%**\n"
-                f"{survey_progress_bar(votes, survey['total_votes'])}"
-            ),
+            value=f"**{votes} votos** │ **{percentage:.1f}%**",
             inline=False,
         )
 
@@ -4573,7 +4781,7 @@ def build_survey_results_embed(survey):
     if not winners:
         result = "No hubo votos, así que no hay una opción ganadora."
     elif len(winners) == 1:
-        result = f"👑 **OPCIÓN GANADORA: {winners[0]}**"
+        result = f"🏆 **GANADOR DESTACADO: {winners[0]}**"
     else:
         result = f"🤝 **EMPATE ENTRE:** {' · '.join(winners)}"
     embed.description += f"\n\n🏆 {result}"
@@ -4634,7 +4842,6 @@ class SurveyVoteButton(discord.ui.Button):
         super().__init__(
             label=option,
             style=discord.ButtonStyle.secondary,
-            emoji="☑️",
             row=option_index // 5,
             custom_id=f"nexus_survey_vote:{survey_id}:{option_index}",
         )
@@ -4678,15 +4885,19 @@ class SurveyVoteButton(discord.ui.Button):
             )
             return
         if status == "unchanged":
-            response = "Tu voto ya está registrado en esa opción."
+            response = f"✅ Tu voto actual es **{survey['options'][self.option_index]}**."
 
         if status != "unchanged":
             try:
-                await interaction.message.edit(embed=build_survey_embed(survey))
-            except discord.HTTPException as error:
+                await update_survey_message(
+                    survey,
+                    message=interaction.message,
+                    previous_counts=survey.get("previous_counts"),
+                )
+            except (discord.HTTPException, OSError, ValueError) as error:
                 logger.exception(f"No pude actualizar el embed de la encuesta {self.survey_id}: {error}")
                 await interaction.edit_original_response(
-                    content="Tu voto quedó registrado, pero no pude actualizar el contador en el embed.",
+                    content="Tu voto quedó registrado, pero no pude actualizar el contador gráfico.",
                     view=SurveyPersonalVoteView(self.survey_id),
                 )
                 return
@@ -4745,12 +4956,11 @@ class SurveyRemoveVoteButton(discord.ui.Button):
             response = "No tienes un voto activo que eliminar en esta encuesta."
         else:
             try:
-                channel = bot.get_channel(survey["channel_id"])
-                if channel is None:
-                    channel = await bot.fetch_channel(survey["channel_id"])
-                poll_message = await channel.fetch_message(survey["message_id"])
-                await poll_message.edit(embed=build_survey_embed(survey))
-            except discord.HTTPException as error:
+                await update_survey_message(
+                    survey,
+                    previous_counts=survey.get("previous_counts"),
+                )
+            except (discord.HTTPException, OSError, ValueError) as error:
                 logger.exception(
                     f"Voto eliminado, pero no pude actualizar el embed de la encuesta {self.survey_id}: {error}"
                 )
@@ -4809,7 +5019,7 @@ class SurveyFinishButton(discord.ui.Button):
             return
         try:
             await publish_survey_result(self.survey_id)
-        except (discord.HTTPException, sqlite3.Error) as error:
+        except (discord.HTTPException, sqlite3.Error, OSError, ValueError) as error:
             logger.exception(f"No pude publicar resultados de encuesta {self.survey_id}: {error}")
             await interaction.followup.send(
                 "La encuesta se finalizó, pero no pude publicar los resultados. El bot los reintentará.",
@@ -4877,6 +5087,121 @@ class SurveyVotersButton(discord.ui.Button):
         )
 
 
+class SurveyClearVotesButton(discord.ui.Button):
+    def __init__(self, survey_id: str, ended: bool = False):
+        super().__init__(
+            label="BORRAR TODOS LOS VOTOS",
+            style=discord.ButtonStyle.danger,
+            emoji="🗑️",
+            custom_id=f"nexus_survey_clear_votes:{survey_id}",
+            disabled=ended,
+        )
+        self.survey_id = survey_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.guild is None or not can_manage_drop(interaction.user):
+            await interaction.response.send_message(
+                "❌ Solo el Staff autorizado puede borrar todos los votos.",
+                ephemeral=True,
+            )
+            return
+        try:
+            survey = await get_survey(self.survey_id)
+        except sqlite3.Error as error:
+            logger.exception(f"No pude leer encuesta {self.survey_id}: {error}")
+            await interaction.response.send_message(
+                "No pude leer la encuesta; revisa los logs del bot.",
+                ephemeral=True,
+            )
+            return
+        if survey is None or survey["control_message_id"] != interaction.message.id:
+            await interaction.response.send_message(
+                "Esta encuesta ya no está disponible.",
+                ephemeral=True,
+            )
+            return
+        if survey["ended"] or survey["end_time"] <= discord.utils.utcnow().timestamp():
+            await interaction.response.send_message(
+                "Solo se pueden borrar los votos mientras la encuesta está activa.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            "⚠️ ¿Seguro que quieres borrar **todos** los votos de esta encuesta? "
+            "Esta acción no se puede deshacer.",
+            view=SurveyClearVotesConfirmView(self.survey_id, interaction.user.id),
+            ephemeral=True,
+        )
+
+
+class SurveyClearVotesConfirmView(discord.ui.View):
+    def __init__(self, survey_id: str, requester_id: int):
+        super().__init__(timeout=60)
+        self.survey_id = survey_id
+        self.requester_id = requester_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if (
+            interaction.user.id != self.requester_id
+            or interaction.guild is None
+            or not can_manage_drop(interaction.user)
+        ):
+            await interaction.response.send_message(
+                "Solo el Staff que inició esta acción puede confirmarla.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Sí, borrar todos", style=discord.ButtonStyle.danger, emoji="🗑️")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            status, result = await reset_survey_votes(self.survey_id)
+        except sqlite3.Error as error:
+            logger.exception(f"No pude borrar los votos de la encuesta {self.survey_id}: {error}")
+            await interaction.edit_original_response(
+                content="No pude borrar los votos; revisa los logs del bot.",
+                view=None,
+            )
+            return
+
+        if status == "missing":
+            response = "Esta encuesta ya no existe."
+        elif status == "ended":
+            response = "La encuesta ya finalizó; no se modificaron sus resultados."
+        elif status == "expired":
+            await finish_survey(self.survey_id)
+            response = "La encuesta ya venció; no se modificaron sus votos."
+        else:
+            survey, deleted_count = result
+            try:
+                await update_survey_message(
+                    survey,
+                    previous_counts=survey.get("previous_counts"),
+                )
+            except (discord.HTTPException, OSError, ValueError) as error:
+                logger.exception(
+                    f"Borré votos de {self.survey_id}, pero no pude actualizar el gráfico: {error}"
+                )
+                response = (
+                    f"Se borraron **{deleted_count} votos**, pero no pude actualizar "
+                    "el gráfico de la encuesta."
+                )
+            else:
+                response = f"✅ Se borraron **{deleted_count} votos** de la encuesta."
+
+        await interaction.edit_original_response(content=response, view=None)
+
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="Acción cancelada; no se borraron votos.",
+            view=None,
+        )
+
+
 class SurveyVoterPagesView(discord.ui.View):
     def __init__(self, embeds):
         super().__init__(timeout=180)
@@ -4914,6 +5239,7 @@ class SurveyControlView(discord.ui.View):
         button.disabled = ended
         self.add_item(button)
         self.add_item(SurveyVotersButton(survey_id))
+        self.add_item(SurveyClearVotesButton(survey_id, ended=ended))
 
 
 async def publish_survey_result(survey_id: str):
@@ -4926,8 +5252,9 @@ async def publish_survey_result(survey_id: str):
         if channel is None:
             channel = await bot.fetch_channel(survey["channel_id"])
         poll_message = await channel.fetch_message(survey["message_id"])
-        await poll_message.edit(
-            embed=build_survey_embed(survey),
+        await update_survey_message(
+            survey,
+            message=poll_message,
             view=SurveyView(survey),
         )
 
@@ -4956,6 +5283,26 @@ async def restore_active_survey_views():
     for survey in await list_active_surveys():
         if survey["message_id"] is not None:
             bot.add_view(SurveyView(survey), message_id=survey["message_id"])
+            try:
+                channel = bot.get_channel(survey["channel_id"])
+                if channel is None:
+                    channel = await bot.fetch_channel(survey["channel_id"])
+                poll_message = await channel.fetch_message(survey["message_id"])
+                chart_filename = survey_chart_filename(survey["survey_id"])
+                if not any(
+                    attachment.filename == chart_filename
+                    for attachment in poll_message.attachments
+                ):
+                    await update_survey_message(
+                        survey,
+                        message=poll_message,
+                        previous_counts=survey["counts"],
+                        view=SurveyView(survey),
+                    )
+            except discord.NotFound:
+                logger.info(f"El mensaje de la encuesta {survey['survey_id']} ya no existe")
+            except (discord.HTTPException, OSError, ValueError):
+                logger.exception(f"No pude restaurar el gráfico de la encuesta {survey['survey_id']}")
 
     for survey in await list_survey_controls():
         control_view = SurveyControlView(survey["survey_id"], ended=survey["ended"])
@@ -4966,13 +5313,16 @@ async def restore_active_survey_views():
             if control_channel is None:
                 control_channel = await bot.fetch_channel(control_channel_id)
             control_message = await control_channel.fetch_message(survey["control_message_id"])
-            voter_custom_id = f"nexus_survey_voters:{survey['survey_id']}"
+            required_custom_ids = {
+                f"nexus_survey_voters:{survey['survey_id']}",
+                f"nexus_survey_clear_votes:{survey['survey_id']}",
+            }
             existing_custom_ids = {
                 component.custom_id
                 for row in control_message.components
                 for component in row.children
             }
-            if voter_custom_id not in existing_custom_ids:
+            if not required_custom_ids.issubset(existing_custom_ids):
                 await control_message.edit(view=control_view)
         except discord.NotFound:
             logger.info(f"El mensaje de control de la encuesta {survey['survey_id']} ya no existe")
@@ -4984,7 +5334,7 @@ async def restore_active_survey_views():
     for survey in await list_pending_survey_results():
         try:
             await publish_survey_result(survey["survey_id"])
-        except (discord.HTTPException, sqlite3.Error) as error:
+        except (discord.HTTPException, sqlite3.Error, OSError, ValueError) as error:
             logger.exception(f"No pude restaurar resultados de la encuesta {survey['survey_id']}: {error}")
 
 
@@ -4999,14 +5349,14 @@ async def check_surveys_loop():
                     if status == "finished":
                         try:
                             await publish_survey_result(survey["survey_id"])
-                        except (discord.HTTPException, sqlite3.Error) as error:
+                        except (discord.HTTPException, sqlite3.Error, OSError, ValueError) as error:
                             logger.exception(
                                 f"No pude publicar resultados de encuesta {survey['survey_id']}: {error}"
                             )
             for survey in await list_pending_survey_results():
                 try:
                     await publish_survey_result(survey["survey_id"])
-                except (discord.HTTPException, sqlite3.Error) as error:
+                except (discord.HTTPException, sqlite3.Error, OSError, ValueError) as error:
                     logger.exception(
                         f"No pude recuperar resultados de encuesta {survey['survey_id']}: {error}"
                     )
@@ -5128,39 +5478,61 @@ class SurveyCreationModal(discord.ui.Modal):
             )
             return
 
-        send_options = {
-            "embed": build_survey_embed(survey),
-            "allowed_mentions": discord.AllowedMentions.none(),
-        }
-        if image_file is not None:
-            send_options["file"] = image_file
         try:
+            chart_file = await create_survey_chart_file(survey)
+            send_files = [chart_file]
+            if image_file is not None:
+                send_files.insert(0, image_file)
+            send_options = {
+                "embeds": build_survey_message_embeds(survey),
+                "files": send_files,
+                "allowed_mentions": discord.AllowedMentions.none(),
+            }
             poll_message = await interaction.channel.send(**send_options)
-        except discord.HTTPException as error:
+        except (discord.HTTPException, OSError, ValueError) as error:
             await delete_survey_record(survey["survey_id"])
             logger.exception(f"No pude publicar la encuesta: {error}")
-            await interaction.followup.send("No pude publicar la encuesta en este canal.", ephemeral=True)
+            await interaction.followup.send(
+                "No pude generar o publicar la encuesta y su gráfico.",
+                ephemeral=True,
+            )
             return
 
-        if image_file is not None and not poll_message.attachments:
+        image_attachment = next(
+            (
+                attachment
+                for attachment in poll_message.attachments
+                if image_file is not None and attachment.filename == image_file.filename
+            ),
+            None,
+        )
+        chart_attachment = next(
+            (
+                attachment
+                for attachment in poll_message.attachments
+                if attachment.filename == chart_file.filename
+            ),
+            None,
+        )
+        if chart_attachment is None or (image_file is not None and image_attachment is None):
             await delete_survey_record(survey["survey_id"])
             try:
                 await poll_message.delete()
             except discord.HTTPException as error:
                 logger.error(f"No pude retirar la encuesta sin adjunto {poll_message.id}: {error}")
             await interaction.followup.send(
-                "Discord no confirmó la imagen adjunta, así que no activé la encuesta.",
+                "Discord no confirmó todos los gráficos o imágenes, así que no activé la encuesta.",
                 ephemeral=True,
             )
             return
 
-        public_image_url = poll_message.attachments[0].url if poll_message.attachments else image_url
+        public_image_url = image_attachment.url if image_attachment else None
         try:
             await set_survey_message(survey["survey_id"], poll_message.id, public_image_url)
             survey["message_id"] = poll_message.id
             survey["image_url"] = public_image_url
             await poll_message.edit(
-                embed=build_survey_embed(survey),
+                embeds=build_survey_message_embeds(survey),
                 view=SurveyView(survey),
             )
         except (sqlite3.Error, discord.HTTPException) as error:

@@ -68,11 +68,14 @@ usa `drops.json`.
 
 `/encuesta` abre un formulario para Staff con pregunta, opciones (una por línea,
 de 2 a 25), duración e imagen opcional. El embed muestra el conteo y el porcentaje
-por opción con barras de progreso; conserva la barra lateral roja, pero las opciones
-usan botones grises. Un voto nuevo reemplaza el anterior. Tras votar, el usuario
-recibe una confirmación privada con `Eliminar mi voto`; así puede retirar su voto
-sin mostrar un botón de eliminación a quienes no han votado. Los resultados y
-cambios de voto se guardan en
+por opción con un gráfico GIF de barras redondeadas, en gris oscuro y rojo; las
+barras se animan suavemente al cambiar los votos. Conserva la barra lateral roja,
+pero las opciones usan botones grises. Discord no permite que el estado de selección
+de un botón público sea distinto para cada usuario, por lo que la selección se
+confirma en privado. Un voto nuevo reemplaza el anterior. Tras votar, el usuario
+recibe una confirmación privada con `Eliminar mi voto`; así puede retirar solo su
+voto. El control de Staff incluye una acción confirmada para borrar todos los votos
+de una encuesta activa. Los resultados y cambios de voto se guardan en
 `surveys.sqlite3` (o en la ruta indicada por `SURVEYS_DB_PATH`) y las encuestas
 activas continúan después de reiniciar el proceso.
 
@@ -83,7 +86,8 @@ mensaje principal. En ese mismo control, `VOTANTES` muestra de forma privada los
 nombres de quienes votaron, agrupados por opción; si la lista es larga, aparece
 paginada. La encuesta también finaliza automáticamente y publica
 porcentajes, conteos y ganadores o empate. El formulario de imagen requiere
-`discord.py` 2.7 o superior.
+`discord.py` 2.7 o superior. Las gráficas animadas se generan con Pillow, incluido
+en `requirements.txt`.
 
 En Render, SQLite solo persiste entre despliegues si `SURVEYS_DB_PATH` apunta a un
 disco persistente montado en el servicio. El sistema actual usa un worker gratuito;
